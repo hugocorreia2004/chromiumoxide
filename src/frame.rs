@@ -392,11 +392,11 @@ mod tests {
 
     fn test_frame() -> (Frame, PageHandle) {
         let page_handle = PageHandle::new(
-                TargetId::new("target"),
-                SessionId::new("main"),
-                None,
-                std::time::Duration::from_millis(crate::handler::REQUEST_TIMEOUT),
-            );
+            TargetId::new("target"),
+            SessionId::new("main"),
+            None,
+            std::time::Duration::from_millis(crate::handler::REQUEST_TIMEOUT),
+        );
         let frame = Frame::from_info(
             Arc::clone(page_handle.inner()),
             FrameInfo {

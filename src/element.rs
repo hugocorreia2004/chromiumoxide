@@ -824,9 +824,10 @@ pub(crate) fn remote_object_ids_for_exception(
         .exception
         .as_ref()
         .and_then(|exception| exception.object_id.clone())
-        && !object_ids.contains(&object_id)
     {
-        object_ids.push(object_id);
+        if !object_ids.contains(&object_id) {
+            object_ids.push(object_id);
+        }
     }
     object_ids
 }
@@ -930,13 +931,12 @@ mod tests {
 
     #[tokio::test]
     async fn element_click_rejects_changed_boundary_snapshot_before_input_dispatch() {
-        let mut page_handle =
-            PageHandle::new(
-                TargetId::new("target"),
-                SessionId::new("child"),
-                None,
-                std::time::Duration::from_millis(crate::handler::REQUEST_TIMEOUT),
-            );
+        let mut page_handle = PageHandle::new(
+            TargetId::new("target"),
+            SessionId::new("child"),
+            None,
+            std::time::Duration::from_millis(crate::handler::REQUEST_TIMEOUT),
+        );
         let element = Element::from_remote_parts(
             Arc::clone(page_handle.inner()),
             RemoteObjectId::new("element"),
@@ -1082,13 +1082,12 @@ mod tests {
 
     #[tokio::test]
     async fn element_dispose_releases_on_the_captured_session() {
-        let mut page_handle =
-            PageHandle::new(
-                TargetId::new("target"),
-                SessionId::new("main"),
-                None,
-                std::time::Duration::from_millis(crate::handler::REQUEST_TIMEOUT),
-            );
+        let mut page_handle = PageHandle::new(
+            TargetId::new("target"),
+            SessionId::new("main"),
+            None,
+            std::time::Duration::from_millis(crate::handler::REQUEST_TIMEOUT),
+        );
         let element = Element::from_remote_parts(
             Arc::clone(page_handle.inner()),
             RemoteObjectId::new("element"),
@@ -1124,13 +1123,12 @@ mod tests {
 
     #[test]
     fn element_drop_does_not_send_an_implicit_release() {
-        let mut page_handle =
-            PageHandle::new(
-                TargetId::new("target"),
-                SessionId::new("main"),
-                None,
-                std::time::Duration::from_millis(crate::handler::REQUEST_TIMEOUT),
-            );
+        let mut page_handle = PageHandle::new(
+            TargetId::new("target"),
+            SessionId::new("main"),
+            None,
+            std::time::Duration::from_millis(crate::handler::REQUEST_TIMEOUT),
+        );
         let element = Element::from_remote_parts(
             Arc::clone(page_handle.inner()),
             RemoteObjectId::new("element"),
