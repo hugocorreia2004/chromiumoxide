@@ -1,4 +1,5 @@
-use chromiumoxide_cdp::cdp::browser_protocol::network::{InterceptionId, RequestId, Response};
+use chromiumoxide_cdp::cdp::browser_protocol::fetch::RequestId as InterceptionId;
+use chromiumoxide_cdp::cdp::browser_protocol::network::{RequestId, Response};
 use chromiumoxide_cdp::cdp::browser_protocol::page::FrameId;
 use chromiumoxide_cdp::cdp::browser_protocol::target::SessionId;
 use std::collections::HashMap;

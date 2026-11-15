@@ -1,3 +1,4 @@
+use chromiumoxide_cdp::cdp::browser_protocol::fetch::RequestId as InterceptionId;
 use chromiumoxide_cdp::cdp::browser_protocol::fetch::{
     self, AuthChallengeResponse, AuthChallengeResponseResponse, ContinueRequestParams,
     ContinueWithAuthParams, DisableParams, EventAuthRequired, EventRequestPaused, RequestPattern,
@@ -5,8 +6,8 @@ use chromiumoxide_cdp::cdp::browser_protocol::fetch::{
 #[allow(deprecated)]
 use chromiumoxide_cdp::cdp::browser_protocol::network::{
     EmulateNetworkConditionsParams, EventLoadingFailed, EventLoadingFinished,
-    EventRequestServedFromCache, EventRequestWillBeSent, EventResponseReceived, Headers,
-    InterceptionId, RequestId, Response, SetCacheDisabledParams, SetExtraHttpHeadersParams,
+    EventRequestServedFromCache, EventRequestWillBeSent, EventResponseReceived, Headers, RequestId,
+    Response, SetCacheDisabledParams, SetExtraHttpHeadersParams,
 };
 use chromiumoxide_cdp::cdp::browser_protocol::target::SessionId;
 use chromiumoxide_cdp::cdp::browser_protocol::{
@@ -258,12 +259,12 @@ impl NetworkManager {
             {
                 self.on_request(
                     &request_will_be_sent.event,
-                    Some(event.request_id.clone().into()),
+                    Some(event.request_id.clone()),
                     request_will_be_sent.session_id,
                 );
             } else {
                 self.request_id_to_interception_id
-                    .insert(network_id.clone(), event.request_id.clone().into());
+                    .insert(network_id.clone(), event.request_id.clone());
             }
         }
     }

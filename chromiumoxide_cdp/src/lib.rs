@@ -31,7 +31,7 @@ pub mod revision;
 // is generally a good idea.
 
 /// Currently built CDP revision
-pub const CURRENT_REVISION: Revision = Revision(1566079);
+pub const CURRENT_REVISION: Revision = Revision(1744848);
 
 /// convenience fixups
 impl Default for CreateTargetParams {
@@ -49,34 +49,6 @@ impl From<fetch::RequestId> for network::RequestId {
 }
 
 impl From<network::RequestId> for fetch::RequestId {
-    fn from(req: network::RequestId) -> Self {
-        let s: String = req.into();
-        s.into()
-    }
-}
-
-impl From<network::InterceptionId> for fetch::RequestId {
-    fn from(req: network::InterceptionId) -> Self {
-        let s: String = req.into();
-        s.into()
-    }
-}
-
-impl From<network::InterceptionId> for network::RequestId {
-    fn from(req: network::InterceptionId) -> Self {
-        let s: String = req.into();
-        s.into()
-    }
-}
-
-impl From<fetch::RequestId> for network::InterceptionId {
-    fn from(req: fetch::RequestId) -> Self {
-        let s: String = req.into();
-        s.into()
-    }
-}
-
-impl From<network::RequestId> for network::InterceptionId {
     fn from(req: network::RequestId) -> Self {
         let s: String = req.into();
         s.into()
