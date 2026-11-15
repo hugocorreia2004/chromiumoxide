@@ -20,7 +20,7 @@ use chromiumoxide_cdp::cdp::browser_protocol::target::{
 use chromiumoxide_cdp::cdp::{CdpEventMessage, IntoEventKind};
 use chromiumoxide_types::*;
 
-pub use self::config::{BrowserConfig, BrowserConfigBuilder, LAUNCH_TIMEOUT};
+pub use self::config::{BrowserConfig, BrowserConfigBuilder, HeadlessMode, LAUNCH_TIMEOUT};
 use crate::async_process::{Child, ExitStatus};
 use crate::cmd::{CommandMessage, to_command_response};
 use crate::conn::Connection;
@@ -100,7 +100,7 @@ impl Browser {
                     } else {
                         format!(
                             "{}{}json/version",
-                            &debug_ws_url,
+                            debug_ws_url,
                             if debug_ws_url.ends_with('/') { "" } else { "/" }
                         )
                     },

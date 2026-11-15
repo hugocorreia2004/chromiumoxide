@@ -7,9 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Add `add_init_script` to `Page` for scripts before navigation
+### Added
+
+- `Page::add_event_listener`, which registers a caller-built `EventListenerRequest` and so lets
+  several event methods be received through one channel, in order
+### Breaking Changes
+
+- Change `Element::node_id` from `NodeId` to `Option<NodeId>` because
+  session-scoped Runtime queries can produce valid elements without a frontend
+  node id
+- Mark `CdpError` as non-exhaustive and add frame- and interception-specific
+  error variants
+
+### Added
+
+- Add session-aware cross-origin iframe (OOPIF) support, including public frame
+  APIs, recursive child-session attachment, frame navigation and evaluation,
+  DOM element interaction, request interception, preload replay, and
+  deterministic detach/teardown handling
+
 ### Changed
 
 - Derive `Clone` for `Element`, `ScreenshotParams` and `ScreenshotParamsBuilder`
+### Added
+
+- Add `Element::call_js_fn_with_args` for puppeteer-style argument passing via CDP `arguments`
+
+### Fixed
+
+- Events of different methods subscribed through one channel are no longer regrouped by method, so
+  they arrive in the order the session delivered them in
 
 ## [0.9.1] 2026-02-25
 
@@ -37,7 +65,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Add `add_init_script` to `Page` for scripts before navigation
+- Add `Page::element_from_node_id` to create an `Element` from a DOM `NodeId`
 - Add `click_with` to `Page` and `Element` for custom click behavior
 
 ## [0.8.0] 2025-11-28
