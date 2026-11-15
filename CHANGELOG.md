@@ -12,6 +12,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `Page::add_event_listener`, which registers a caller-built `EventListenerRequest` and so lets
   several event methods be received through one channel, in order
+### Breaking Changes
+
+- Change `Element::node_id` from `NodeId` to `Option<NodeId>` because
+  session-scoped Runtime queries can produce valid elements without a frontend
+  node id
+- Mark `CdpError` as non-exhaustive and add frame- and interception-specific
+  error variants
+
+### Added
+
+- Add session-aware cross-origin iframe (OOPIF) support, including public frame
+  APIs, recursive child-session attachment, frame navigation and evaluation,
+  DOM element interaction, request interception, preload replay, and
+  deterministic detach/teardown handling
 
 ### Changed
 
