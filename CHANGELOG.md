@@ -12,6 +12,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - Derive `Clone` for `Element`, `ScreenshotParams` and `ScreenshotParamsBuilder`
+### Added
+
+- Add `Element::call_js_fn_with_args` for puppeteer-style argument passing via CDP `arguments`
 
 ## [0.9.1] 2026-02-25
 
