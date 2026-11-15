@@ -5,7 +5,7 @@ use chromiumoxide::cdp::browser_protocol::dom::NodeId;
 use chromiumoxide::cdp::browser_protocol::fetch::{EventAuthRequired, EventRequestPaused};
 use chromiumoxide::cdp::browser_protocol::network::{
     EventLoadingFailed, EventLoadingFinished, EventRequestServedFromCache, EventRequestWillBeSent,
-    EventResponseReceived, InterceptionId, LoaderId, RequestId,
+    EventResponseReceived, LoaderId, RequestId,
 };
 use chromiumoxide::cdp::browser_protocol::page::{
     CrossOriginIsolatedContextType, EventFrameStartedLoading, EventFrameStoppedLoading,
@@ -38,8 +38,13 @@ assert_not_impl_any!(PausedRequest: Clone);
 // Kept as one alias because the exact five-argument constructor signature is
 // the compatibility contract being checked here.
 #[allow(clippy::type_complexity)]
-type HttpRequestConstructor =
-    fn(RequestId, Option<FrameId>, Option<InterceptionId>, bool, Vec<HttpRequest>) -> HttpRequest;
+type HttpRequestConstructor = fn(
+    RequestId,
+    Option<FrameId>,
+    Option<chromiumoxide::cdp::browser_protocol::fetch::RequestId>,
+    bool,
+    Vec<HttpRequest>,
+) -> HttpRequest;
 
 fn assert_element_node_id_is_optional(element: &Element) {
     let _: &Option<NodeId> = &element.node_id;

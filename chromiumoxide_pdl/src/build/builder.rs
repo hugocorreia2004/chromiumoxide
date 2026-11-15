@@ -113,6 +113,12 @@ impl Builder {
         let mut builder_type_defs = TokenStream::default();
         let mut build_fn_assigns = TokenStream::default();
 
+        let field_names: Vec<String> = self
+            .fields
+            .iter()
+            .map(|(_, f)| f.name_ident.to_string())
+            .collect();
+
         for field in self.fields.iter().map(|(_, f)| f) {
             let field_name = &field.name_ident;
             names.push(field_name);
@@ -140,28 +146,33 @@ impl Builder {
                     (format_ident!("{}s", s), field_name.clone())
                 };
 
-                // create from iterator
-                setters.extend(
-                  quote! {
-                     pub fn #single_setter_name(mut self, #single_setter_name: impl Into<#ty>) -> Self {
-                        let v = self.#field_name.get_or_insert(Vec::new());
-                        v.push(#single_setter_name.into());
-                        self
-                     }
-
-                    pub fn #iter_setter_name<I, S>(mut self, #iter_setter_name: I) -> Self
-                    where
-                        I: IntoIterator<Item = S>,
-                        S: Into<#ty>,
-                    {
-                        let v = self.#field_name.get_or_insert(Vec::new());
-                        for val in #iter_setter_name {
-                            v.push(val.into());
+                // A singular setter would clash with a field of the same name
+                // (e.g. `currentTime` next to `currentTimes`): skip it then.
+                if !field_names.contains(&single_setter_name.to_string()) {
+                    setters.extend(quote! {
+                        pub fn #single_setter_name(mut self, #single_setter_name: impl Into<#ty>) -> Self {
+                            let v = self.#field_name.get_or_insert(Vec::new());
+                            v.push(#single_setter_name.into());
+                            self
                         }
-                        self
-                    }
+                    });
+                }
+
+                // create from iterator
+                setters.extend(quote! {
+
+                  pub fn #iter_setter_name<I, S>(mut self, #iter_setter_name: I) -> Self
+                  where
+                      I: IntoIterator<Item = S>,
+                      S: Into<#ty>,
+                  {
+                      let v = self.#field_name.get_or_insert(Vec::new());
+                      for val in #iter_setter_name {
+                          v.push(val.into());
+                      }
+                      self
                   }
-                );
+                });
             } else {
                 setters.extend(quote! {
                     pub fn #field_name(mut self, #field_name : #ty_param ) -> Self {

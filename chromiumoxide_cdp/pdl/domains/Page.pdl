@@ -36,31 +36,6 @@ domain Page
       AdFrameType adFrameType
       optional array of AdFrameExplanation explanations
 
-  # Identifies the script which caused a script or frame to be labelled as an
-  # ad.
-  experimental type AdScriptId extends object
-    properties
-      # Script Id of the script which caused a script or frame to be labelled as
-      # an ad.
-      Runtime.ScriptId scriptId
-      # Id of scriptId's debugger.
-      Runtime.UniqueDebuggerId debuggerId
-
-  # Encapsulates the script ancestry and the root script filterlist rule that
-  # caused the frame to be labelled as an ad. Only created when `ancestryChain`
-  # is not empty.
-  experimental type AdScriptAncestry extends object
-    properties
-      # A chain of `AdScriptId`s representing the ancestry of an ad script that
-      # led to the creation of a frame. The chain is ordered from the script
-      # itself (lower level) up to its root ancestor that was flagged by
-      # filterlist.
-      array of AdScriptId ancestryChain
-      # The filterlist rule that caused the root (last) script in
-      # `ancestryChain` to be ad-tagged. Only populated if the rule is
-      # available.
-      optional string rootScriptFilterlistRule
-
   # Indicates whether the frame is a secure context and why it is the case.
   experimental type SecureContextType extends string
     enum
@@ -99,11 +74,9 @@ domain Page
       all-screens-capture
       ambient-light-sensor
       aria-notify
-      attribution-reporting
       autofill
       autoplay
       bluetooth
-      browsing-topics
       camera
       captured-surface-control
       ch-dpr
@@ -142,24 +115,21 @@ domain Page
       digital-credentials-get
       direct-sockets
       direct-sockets-multicast
-      direct-sockets-private
       display-capture
       document-domain
       encrypted-media
       execution-while-out-of-viewport
       execution-while-not-rendered
-      fenced-unpartitioned-storage-read
       focus-without-user-activation
       fullscreen
       frobulate
       gamepad
       geolocation
       gyroscope
+      haptics
       hid
       identity-credentials-get
       idle-detection
-      interest-cohort
-      join-ad-interest-group
       keyboard-map
       language-detector
       language-model
@@ -176,30 +146,30 @@ domain Page
       otp-credentials
       payment
       picture-in-picture
-      private-aggregation
       private-state-token-issuance
       private-state-token-redemption
       publickey-credentials-create
       publickey-credentials-get
-      record-ad-auction-events
+      publickey-credentials-remote-client-data-json
       rewriter
-      run-ad-auction
       screen-wake-lock
+      semantic-embedder
       serial
-      shared-storage
-      shared-storage-select-url
       smart-card
       speaker-selection
       storage-access
       sub-apps
       summarizer
       sync-xhr
+      tools
       translator
+      unbounded-element
       unload
       usb
       usb-unrestricted
       vertical-scroll
       web-app-installation
+      webnn
       web-printing
       web-share
       window-management
@@ -415,6 +385,8 @@ domain Page
       number scrollOffsetY
       # Frame swap timestamp.
       optional Network.TimeSinceEpoch timestamp
+      # Frame swap timestamp as monotonic time.
+      optional Network.MonotonicTime monotonicTimestamp
 
   # Javascript dialog type.
   type DialogType extends string
@@ -665,6 +637,13 @@ domain Page
       # Whether or not universal access should be granted to the isolated world. This is a powerful
       # option, use with caution.
       optional boolean grantUniveralAccess
+      # An optional content security policy to set for the isolated world.
+      # If omitted, any existing CSP for the world will be cleared.
+      # Note that clearing or updating the CSP does not immediately affect the active
+      # context in the same document because LocalDOMWindow caches the
+      # ContentSecurityPolicy object. The change takes effect on subsequent
+      # navigations when a new window context is created.
+      optional string contentSecurityPolicy
     returns
       # Execution context of the isolated world.
       Runtime.ExecutionContextId executionContextId
@@ -703,7 +682,6 @@ domain Page
     properties
       string action
       string name
-      optional array of ImageResource icons
       # Mimic a map, name is the key, accepts is the value.
       optional array of FileFilter accepts
       # Won't repeat the enums, using string for easy comparison. Same as the
@@ -825,7 +803,18 @@ domain Page
     returns
       optional binary primaryIcon
 
-  # Returns the unique (PWA) app id.
+  type SubApp extends object
+    properties
+      # Display name of the sub-app.
+      string name
+      # Scope of the sub-app.
+      string scope
+      # Manifest id of the sub-app.
+      string manifestId
+      # Start URL of the sub-app.
+      string startUrl
+
+  # Returns the unique (PWA) app id, along with IWA bundle ID and parent app info.
   # Only returns values if the feature flag 'WebAppEnableManifestId' is enabled
   experimental command getAppId
     returns
@@ -833,6 +822,20 @@ domain Page
       optional string appId
       # Recommendation for manifest's id attribute to match current id computed from start_url
       optional string recommendedId
+      # The bundle ID for an Isolated Web App (IWA)
+      optional string bundleId
+      # The name of the parent app if this app is a Sub-App
+      optional string parentAppName
+
+  # Returns the list of installed child Sub-Apps for the inspected parent app.
+  experimental command getSubApps
+    returns
+      array of SubApp subApps
+
+  # Returns the list of sibling Sub-Apps sharing the same parent app if the inspected context is a Sub-App.
+  experimental command getSiblingSubApps
+    returns
+      array of SubApp subApps
 
   experimental command getAdScriptAncestry
     parameters
@@ -843,7 +846,17 @@ domain Page
       # chain is ordered from the most immediate script (in the frame creation
       # stack) to more distant ancestors (that created the immediately preceding
       # script). Only sent if frame is labelled as an ad and ids are available.
-      optional AdScriptAncestry adScriptAncestry
+      optional Network.AdAncestry adScriptAncestry
+
+  # Returns the words that the frame's document added to its spell check custom
+  # dictionary with `document.spellCheckCustomDictionary.addWords()`, sorted.
+  # Page script cannot read the dictionary back; this lets developers inspect
+  # it.
+  experimental command getSpellCheckCustomDictionary
+    parameters
+      FrameId frameId
+    returns
+      array of string words
 
   # Returns present frame tree structure.
   command getFrameTree
@@ -1192,8 +1205,45 @@ domain Page
       optional integer maxWidth
       # Maximum screenshot height.
       optional integer maxHeight
-      # Send every n-th frame.
+      # Send every n-th frame. Must be a positive integer.
       optional integer everyNthFrame
+      # Maximum number of frames sent until screencastFrameAck is required.
+      # Defaults to 3. Must be a positive integer.
+      optional integer maxFramesInFlight
+      # By default, after screencastFrameAck arrives, the next produced frame is sent.
+      # Passing this flag enables storing the last produced frame in memory, which is
+      # immediately sent upon screencastFrameAck. This way, overall performance is
+      # traded for a better latency.
+      optional boolean sendLastFrame
+
+  # Starts screencast video recording.
+  experimental command startScreenRecording
+    parameters
+      optional boolean audio
+      # Maximum frame width in pixels.
+      optional integer maxWidth
+      # Maximum frame height in pixels.
+      optional integer maxHeight
+      # Maximum frame rate in frames per second.
+      optional integer frameRate
+      # The area to record. Defaults to `target`.
+      experimental optional enum captureArea
+        # Records only the target page.
+        target
+        # Records the browser window that shows the target, like window
+        # capture with getDisplayMedia(). If the target is a docked DevTools
+        # window, the window shows DevTools and the inspected page. Only
+        # available to trusted clients and to embedders that support it.
+        browserWindow
+    returns
+      # A handle of the stream that holds resulting screencast data.
+      experimental IO.StreamHandle stream
+
+  # Stops screencast video recording.
+  experimental command stopScreenRecording
+    returns
+      # A handle of the stream that holds resulting screencast data.
+      experimental IO.StreamHandle stream
 
   # Force the page stop all navigations and pending resource fetches.
   command stopLoading
@@ -1537,6 +1587,7 @@ domain Page
       BackForwardCacheDisabledForPrerender
       UserAgentOverrideDiffers
       ForegroundCacheLimit
+      ForwardCacheDisabled
       BrowsingInstanceNotSwapped
       BackForwardCacheDisabledForDelegate
       UnloadHandlerExistsInMainFrame
@@ -1581,6 +1632,7 @@ domain Page
       SharedWorkerMessage
       SharedWorkerWithNoActiveClient
       WebLocks
+      WebLocksContention
       WebHID
       WebBluetooth
       WebShare
@@ -1642,6 +1694,8 @@ domain Page
       EmbedderExtensionMessaging
       EmbedderExtensionMessagingForOpenPort
       EmbedderExtensionSentMessageToCachedFrame
+      EmbedderExtensionFrame
+      EmbedderPrivilegedWebContents
       RequestedByWebViewClient
       PostMessageByWebViewClient
       CacheControlNoStoreDeviceBoundSessionTerminated
@@ -1782,3 +1836,10 @@ domain Page
       # The format is defined by the `AnnotatedPageContent` message in
       # components/optimization_guide/proto/features/common_quality_data.proto
       binary content
+
+  # Configures input visualization on the page.
+  experimental command setInputVisualization
+    parameters
+      # Whether to enable click visualization.
+      optional boolean clicks
+
