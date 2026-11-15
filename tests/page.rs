@@ -78,14 +78,14 @@ async fn test_element_from_node_id() {
             .await
             .expect("should find target element");
 
-        let node_id = original.node_id;
+        let node_id = original.node_id.expect("element should have a NodeId");
 
         let reconstructed = page
             .element_from_node_id(node_id)
             .await
             .expect("should create element from NodeId");
 
-        assert_eq!(reconstructed.node_id, node_id);
+        assert_eq!(reconstructed.node_id, Some(node_id));
 
         let text = reconstructed
             .inner_text()

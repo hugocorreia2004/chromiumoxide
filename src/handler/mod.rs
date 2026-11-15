@@ -1750,6 +1750,11 @@ mod tests {
                 .expect("complete websocket handshake");
             let _ = close_rx.await;
             let _ = websocket.close(None).await;
+            // Finish the closing handshake: read until the client's close reply
+            // arrives. Dropping the socket before that makes Windows answer the
+            // reply with a reset (WSAECONNRESET), which the client sees as an
+            // error instead of EOF.
+            while let Some(Ok(_)) = websocket.next().await {}
         });
 
         let connection = Connection::connect(format!("ws://{address}"))
@@ -1776,6 +1781,11 @@ mod tests {
                 .expect("complete websocket handshake");
             let _ = close_rx.await;
             let _ = websocket.close(None).await;
+            // Finish the closing handshake: read until the client's close reply
+            // arrives. Dropping the socket before that makes Windows answer the
+            // reply with a reset (WSAECONNRESET), which the client sees as an
+            // error instead of EOF.
+            while let Some(Ok(_)) = websocket.next().await {}
         });
 
         let connection = Connection::connect(format!("ws://{address}"))
