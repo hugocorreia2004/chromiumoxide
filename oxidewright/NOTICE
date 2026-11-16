@@ -25,3 +25,7 @@ Playwright's TypeScript sources (Apache License, Version 2.0).
 oxidewright is not affiliated with, endorsed by or sponsored by Microsoft or
 the Playwright or Patchright projects. "Playwright" is a trademark of
 Microsoft Corporation.
+
+src/devices.json is Playwright's device descriptor list
+(packages/isomorphic/deviceDescriptorsSource.json of Playwright 1.65.1),
+Copyright (c) Microsoft Corporation, Apache License, Version 2.0.

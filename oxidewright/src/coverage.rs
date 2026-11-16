@@ -98,11 +98,14 @@ struct CssData {
     order: Vec<String>,
 }
 
+type Tasks = Vec<tokio::task::JoinHandle<()>>;
+
 /// Coverage state of a page.
 #[derive(Default)]
 pub(crate) struct CoverageState {
-    js: Option<(Arc<Mutex<JsData>>, Vec<tokio::task::JoinHandle<()>>, bool)>,
-    css: Option<(Arc<Mutex<CssData>>, Vec<tokio::task::JoinHandle<()>>)>,
+    /// Collected data, listener tasks and `reportAnonymousScripts`.
+    js: Option<(Arc<Mutex<JsData>>, Tasks, bool)>,
+    css: Option<(Arc<Mutex<CssData>>, Tasks)>,
 }
 
 async fn send(page: &Page, method: &str, params: Value) -> Result<Value> {
