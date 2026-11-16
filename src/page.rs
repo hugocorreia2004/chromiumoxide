@@ -1785,6 +1785,10 @@ pub struct ScreenshotParams {
     pub full_page: Option<bool>,
     /// Make the background transparent (png only).
     pub omit_background: Option<bool>,
+    /// Bring the page to the front (`Target.activateTarget`) before the
+    /// capture. Off by default: activation steals the window focus of a
+    /// headful browser, and the capture works without it.
+    pub activate: Option<bool>,
 }
 
 impl ScreenshotParams {
@@ -1794,6 +1798,10 @@ impl ScreenshotParams {
 
     pub(crate) fn full_page(&self) -> bool {
         self.full_page.unwrap_or(false)
+    }
+
+    pub(crate) fn activate(&self) -> bool {
+        self.activate.unwrap_or(false)
     }
 
     pub(crate) fn omit_background(&self) -> bool {
@@ -1812,6 +1820,7 @@ pub struct ScreenshotParamsBuilder {
     cdp_params: CaptureScreenshotParams,
     full_page: Option<bool>,
     omit_background: Option<bool>,
+    activate: Option<bool>,
 }
 
 impl ScreenshotParamsBuilder {
@@ -1857,11 +1866,21 @@ impl ScreenshotParamsBuilder {
         self
     }
 
+    /// Bring the page to the front before the capture (defaults to false).
+    ///
+    /// Activation focuses the browser window, so a headful browser steals the
+    /// focus on every capture when this is on.
+    pub fn activate(mut self, activate: impl Into<bool>) -> Self {
+        self.activate = Some(activate.into());
+        self
+    }
+
     pub fn build(self) -> ScreenshotParams {
         ScreenshotParams {
             cdp_params: self.cdp_params,
             full_page: self.full_page,
             omit_background: self.omit_background,
+            activate: self.activate,
         }
     }
 }

@@ -500,8 +500,10 @@ impl PageInner {
     }
 
     pub async fn screenshot(&self, params: impl Into<ScreenshotParams>) -> Result<Vec<u8>> {
-        self.activate().await?;
         let params = params.into();
+        if params.activate() {
+            self.activate().await?;
+        }
         let full_page = params.full_page();
         let omit_background = params.omit_background();
 
@@ -568,4 +570,68 @@ pub(crate) async fn execute<T: Command>(
     sender.send(TargetMessage::Command(msg)).await?;
     let resp = rx.await??;
     to_command_response::<T>(resp, method)
+}
+
+#[cfg(test)]
+mod tests {
+    use futures::executor::block_on;
+
+    use super::*;
+
+    /// Run `Page::screenshot` against a fake target and return the methods of
+    /// the commands it sends, failing the capture itself.
+    fn screenshot_methods(params: ScreenshotParams) -> Vec<String> {
+        let mut handle = PageHandle::new(
+            TargetId::new("target"),
+            SessionId::new("session"),
+            None,
+            Duration::from_secs(5),
+        );
+        let page = Arc::clone(handle.inner());
+        block_on(async {
+            let shot = page.screenshot(params);
+            let answer = async {
+                let mut methods = Vec::new();
+                while let Some(message) = handle.rx.next().await {
+                    let TargetMessage::Command(command) = message else {
+                        panic!("screenshot only sends commands");
+                    };
+                    let method = command.method.to_string();
+                    let capture = method == "Page.captureScreenshot";
+                    let reply = if capture {
+                        Err(CdpError::NoResponse)
+                    } else {
+                        Ok(chromiumoxide_types::Response {
+                            id: chromiumoxide_types::CallId::new(0),
+                            result: Some(serde_json::json!({})),
+                            error: None,
+                        })
+                    };
+                    let _ = command.sender.send(reply);
+                    methods.push(method);
+                    if capture {
+                        break;
+                    }
+                }
+                methods
+            };
+            let (result, methods) = futures::join!(shot, answer);
+            assert!(matches!(result, Err(CdpError::NoResponse)));
+            methods
+        })
+    }
+
+    /// mattsse/chromiumoxide#308: a screenshot does not bring the page to the
+    /// front unless asked to.
+    #[test]
+    fn screenshot_does_not_activate_the_target_by_default() {
+        let methods = screenshot_methods(ScreenshotParams::builder().build());
+        assert_eq!(methods, ["Page.captureScreenshot"]);
+    }
+
+    #[test]
+    fn screenshot_activates_the_target_when_asked() {
+        let methods = screenshot_methods(ScreenshotParams::builder().activate(true).build());
+        assert_eq!(methods, ["Target.activateTarget", "Page.captureScreenshot"]);
+    }
 }
