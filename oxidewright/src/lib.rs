@@ -42,12 +42,19 @@ mod browser_context;
 mod browser_type;
 mod error;
 pub mod execution_context;
+mod element_actions;
 mod frame;
+pub mod input;
 pub mod js;
 mod js_handle;
+mod locator;
+mod locator_generators;
+mod locator_utils;
 mod network;
 mod page;
 mod progress;
+mod selector_parser;
+mod selectors;
 mod url_match;
 
 pub use browser::Browser;
@@ -64,6 +71,7 @@ pub use js_handle::{ElementHandle, EvaluateHandleOn, EvaluateOn, JSHandle};
 pub use network::{Request, Response};
 pub use page::{AddInitScript, GoHistory, InitScript, Page, Reload, ViewportSize};
 pub use progress::DEFAULT_TIMEOUT;
+pub use selectors::{Selectors, selectors};
 pub use url_match::{UrlMatch, glob_to_regex_pattern};
 
 /// Re-export of the underlying CDP library.

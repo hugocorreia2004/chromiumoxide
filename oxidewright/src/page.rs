@@ -139,6 +139,8 @@ pub(crate) struct PageInner {
     requests: Mutex<HashMap<String, Request>>,
     timer_tx: UnboundedSender<(String, u64)>,
     viewport: Mutex<Option<ViewportSize>>,
+    /// Keyboard, mouse and touchscreen state (see [`crate::input`]).
+    pub(crate) input: Arc<crate::input::InputState>,
     /// Protocol events not yet applied; drained by the pump task and, for
     /// accessors, synchronously (see [`PageInner::sync`]).
     events: Mutex<Option<FutReceiver<Arc<dyn Event>>>>,
@@ -157,6 +159,7 @@ impl PageInner {
         let world_name: String = std::iter::repeat_with(fastrand::alphanumeric)
             .take(16)
             .collect();
+        let input = crate::input::InputState::new(cdp.clone());
         let page = Arc::new_cyclic(|weak| PageInner {
             cdp,
             browser,
@@ -171,6 +174,7 @@ impl PageInner {
             requests: Mutex::new(HashMap::new()),
             timer_tx,
             viewport: Mutex::new(None),
+            input,
             events: Mutex::new(None),
             self_weak: weak.clone(),
         });
@@ -372,7 +376,7 @@ impl PageInner {
     }
 
     pub(crate) fn test_id_attribute_name(&self) -> String {
-        "data-testid".to_string()
+        crate::selectors::test_id_attribute_name()
     }
 
     pub(crate) fn resolve_url(&self, url: &str) -> String {
