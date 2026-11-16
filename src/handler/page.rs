@@ -96,6 +96,12 @@ pub(crate) struct PageInner {
 }
 
 impl PageInner {
+    /// The configured `BrowserConfig::request_timeout`.
+    #[cfg_attr(feature = "stealth", allow(dead_code))]
+    pub(crate) fn request_timeout(&self) -> Duration {
+        self.request_timeout
+    }
+
     /// Execute a PDL command and return its response
     pub(crate) async fn execute<T: Command>(&self, cmd: T) -> Result<CommandResponse<T::Response>> {
         execute(cmd, self.sender.clone(), Some(self.session_id.clone())).await
@@ -621,7 +627,9 @@ impl PageInner {
             })
             .await
             .or_target_closed()?;
-        let slot = rx.await??;
+        // A frame whose session is still initializing is answered once it is
+        // ready; a stale handle is answered at once.
+        let slot = with_timeout(self.request_timeout, async { rx.await? }).await?;
         if let Some(context_id) = slot.context_id {
             return Ok(IsolatedWorld {
                 frame_id: slot.frame_id,

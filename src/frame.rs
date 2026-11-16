@@ -372,7 +372,14 @@ impl Frame {
             })
             .await
             .or_target_closed()?;
-        let context = rx.await??.ok_or(CdpError::FrameNotReady)?;
+        // The handler answers at once for a stale handle, and otherwise waits
+        // until the frame's session is initialized and its context reported.
+        let delay = futures_timer::Delay::new(self.inner.tab.request_timeout());
+        let context = match futures::future::select(rx, delay).await {
+            futures::future::Either::Left((answer, _)) => answer??,
+            futures::future::Either::Right(_) => return Err(CdpError::Timeout),
+        }
+        .ok_or(CdpError::FrameNotReady)?;
         if context.session_id != self.inner.session_id {
             return Err(CdpError::FrameNotReady);
         }

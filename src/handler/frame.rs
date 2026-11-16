@@ -1053,8 +1053,38 @@ impl FrameManager {
     }
 
     pub fn on_frame_detached(&mut self, event: &EventFrameDetached) {
+        if let Some(session_id) = self.main_session_id.clone() {
+            self.on_frame_detached_in_session(event, session_id);
+        } else {
+            match event.reason {
+                FrameDetachedReason::Swap => self.clear_frame_contexts(&event.frame_id),
+                FrameDetachedReason::Remove => {
+                    self.remove_frames_recursively(&event.frame_id);
+                }
+            }
+        }
+    }
+
+    pub(crate) fn on_frame_detached_in_session(
+        &mut self,
+        event: &EventFrameDetached,
+        session_id: SessionId,
+    ) {
         match event.reason {
-            FrameDetachedReason::Swap => self.clear_frame_contexts(&event.frame_id),
+            // The old renderer reports the swap of a frame that moved to
+            // another process (session). That renderer runs concurrently with
+            // the new one, so the report can arrive after the frame was bound
+            // to its new session and that session reported the new document's
+            // contexts: only the contexts of the reporting session are gone.
+            FrameDetachedReason::Swap => {
+                if self
+                    .frames
+                    .get(&event.frame_id)
+                    .is_some_and(|frame| frame.session_id() == Some(&session_id))
+                {
+                    self.clear_frame_contexts_for_session(&event.frame_id, &session_id);
+                }
+            }
             FrameDetachedReason::Remove => {
                 self.remove_frames_recursively(&event.frame_id);
             }
@@ -3094,6 +3124,59 @@ mod tests {
             reason: FrameDetachedReason::Remove,
         });
 
+        assert_no_orphan_forward_entries(&manager);
+    }
+
+    #[test]
+    fn late_swap_detach_from_the_old_session_keeps_the_new_sessions_context() {
+        let (mut manager, main_session, _) = manager_with_main();
+        add_child(&mut manager, "child", "main-frame", &main_session);
+        let child_frame_id = FrameId::new("child");
+        manager.on_frame_execution_context_created_in_session(
+            &execution_context("child", 1, "old-default"),
+            main_session.clone(),
+        );
+
+        // The frame moves to its own process: it is bound to the new session,
+        // which reports the new document's main world ...
+        let child_session = session("child-session");
+        manager.on_attached_to_target_in_session(
+            &attached_event("child", "main-frame", &child_session),
+            child_session.clone(),
+        );
+        manager.on_frame_execution_context_created_in_session(
+            &execution_context("child", 1, "new-default"),
+            child_session.clone(),
+        );
+        // ... before the old renderer reports the swap on the old session.
+        manager.on_frame_detached_in_session(
+            &EventFrameDetached {
+                frame_id: child_frame_id.clone(),
+                reason: FrameDetachedReason::Swap,
+            },
+            main_session.clone(),
+        );
+
+        let frame = manager.frame(&child_frame_id).expect("child is tracked");
+        assert_eq!(frame.session_id(), Some(&child_session));
+        assert_eq!(
+            frame.main_world().execution_context(),
+            Some(ExecutionContextId::new(1))
+        );
+        assert!(manager.context_by_unique.contains_key("new-default"));
+        assert!(!manager.context_by_unique.contains_key("old-default"));
+
+        // A swap reported by the frame's current session clears its contexts.
+        manager.on_frame_detached_in_session(
+            &EventFrameDetached {
+                frame_id: child_frame_id.clone(),
+                reason: FrameDetachedReason::Swap,
+            },
+            child_session.clone(),
+        );
+        let frame = manager.frame(&child_frame_id).expect("child is tracked");
+        assert_eq!(frame.main_world().execution_context(), None);
+        assert!(!manager.context_by_unique.contains_key("new-default"));
         assert_no_orphan_forward_entries(&manager);
     }
 
