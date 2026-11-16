@@ -284,6 +284,13 @@ impl Page {
     /// Changes your user_agent, removes the `navigator.webdriver` property
     /// changes permissions, pluggins rendering contexts and the `window.chrome`
     /// property to make it harder to detect the scraper as a bot
+    ///
+    /// **Not part of the `stealth` cargo feature.** This injects scripts that
+    /// override `navigator` properties and WebGL values, and sets a fixed user
+    /// agent: it changes the browser's fingerprint, and the overrides
+    /// themselves can be detected. The `stealth` feature instead changes only
+    /// how this crate talks to the browser, so that the page cannot see the
+    /// automation; it does not touch the fingerprint.
     pub async fn enable_stealth_mode(&self) -> Result<()> {
         self._enable_stealth_mode().await?;
         self.set_user_agent("Mozilla/5.0 (Windows NT 11.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/107.0.5296.0 Safari/537.36").await?;
@@ -294,6 +301,10 @@ impl Page {
     /// Changes your user_agent with a custom agent, removes the `navigator.webdriver` property
     /// changes permissions, pluggins rendering contexts and the `window.chrome`
     /// property to make it harder to detect the scraper as a bot
+    ///
+    /// **Not part of the `stealth` cargo feature**: like
+    /// [`Page::enable_stealth_mode`] it changes the fingerprint with injected
+    /// overrides.
     pub async fn enable_stealth_mode_with_agent(&self, ua: &str) -> Result<()> {
         self._enable_stealth_mode().await?;
         if !ua.is_empty() {
@@ -587,11 +598,24 @@ impl Page {
         Ok(PausedRequestStream { inner })
     }
 
+    /// Exposes `function` to the page as `window[name]`, backed by a CDP
+    /// binding.
+    ///
+    /// Not available with the `stealth` feature: `Runtime.addBinding` adds a
+    /// global the page can find, so the call fails with
+    /// [`CdpError::NotAllowed`].
     pub async fn expose_function(
         &self,
         name: impl Into<String>,
         function: impl AsRef<str>,
     ) -> Result<()> {
+        if cfg!(feature = "stealth") {
+            return Err(CdpError::NotAllowed(
+                "Page::expose_function is not available with the `stealth` feature: \
+                 Runtime.addBinding is visible to page scripts"
+                    .to_owned(),
+            ));
+        }
         let name = name.into();
         let expression = utils::evaluation_string(function, &["exposedFun", name.as_str()]);
 
@@ -1542,12 +1566,22 @@ impl Page {
     ///     # Ok(())
     /// # }
     /// ```
+    ///
+    /// With the `stealth` feature the evaluation runs in an isolated world of
+    /// the main frame (it shares the DOM with the page but not its globals);
+    /// use [`Page::evaluate_main_world`] for code that needs the page's own
+    /// JavaScript objects.
     pub async fn evaluate(&self, evaluate: impl Into<Evaluation>) -> Result<EvaluationResult> {
         match evaluate.into() {
             Evaluation::Expression(mut expr) => {
+                // Under `stealth` the isolated world is chosen (and retried)
+                // by `evaluate_expression`.
+                #[cfg(not(feature = "stealth"))]
                 if expr.context_id.is_none() {
                     expr.context_id = self.execution_context().await?;
                 }
+                #[cfg(feature = "stealth")]
+                let _ = &mut expr;
                 let fallback = expr
                     .eval_as_function_fallback
                     .and_then(|p| if p { Some(expr.clone()) } else { None });
@@ -1624,8 +1658,40 @@ impl Page {
         self.inner.evaluate_function(evaluate).await
     }
 
+    /// Evaluates an expression or function in the main world of the page's
+    /// main frame, where the page's own scripts and globals live.
+    ///
+    /// The main world is reached without `Runtime.enable`: an expression is
+    /// evaluated with `Runtime.evaluate` and no context id, and a function is
+    /// called with `Runtime.callFunctionOn` on the main world's `globalThis`
+    /// (`this` inside the function). Page scripts can observe what the code
+    /// does there (e.g. calls to functions they patched), so prefer
+    /// [`Page::evaluate`] unless the page's globals are needed.
+    ///
+    /// # Example
+    /// ```no_run
+    /// # use chromiumoxide::page::Page;
+    /// # use chromiumoxide::error::Result;
+    /// # async fn demo(page: Page) -> Result<()> {
+    ///     let app_version: String = page
+    ///         .evaluate_main_world("window.APP_VERSION")
+    ///         .await?
+    ///         .into_value()?;
+    ///     # Ok(())
+    /// # }
+    /// ```
+    pub async fn evaluate_main_world(
+        &self,
+        evaluation: impl Into<Evaluation>,
+    ) -> Result<EvaluationResult> {
+        self.inner.evaluate_main_world(evaluation.into()).await
+    }
+
     /// Returns the default execution context identifier of this page that
     /// represents the context for JavaScript execution.
+    ///
+    /// With the `stealth` feature this is the main frame's isolated world
+    /// (created on demand), never a main-world context.
     pub async fn execution_context(&self) -> Result<Option<ExecutionContextId>> {
         self.inner.execution_context().await
     }

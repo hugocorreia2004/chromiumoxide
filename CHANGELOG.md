@@ -30,6 +30,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `stealth` cargo feature: no `Runtime.enable`, `Log.enable` or `Performance.enable`, no utility
+  world or init script at attach, and evaluation and element APIs in isolated worlds created on
+  demand per frame (cached per document, invalidated on navigation, detach and session changes,
+  per-session for out-of-process iframes). `Page::expose_function` is refused under the feature.
+  Ported from the techniques of Patchright; see the README
+- `Page::evaluate_main_world` and `Frame::evaluate_main_world`, which reach the page's main world
+  without `Runtime.enable`
 - `Page::wait_for_navigation_until(LifecycleEvent)`, e.g. to wait for
   `LifecycleEvent::NetworkIdle` (mattsse/chromiumoxide#36); `LifecycleEvent` is
   re-exported at the crate root
