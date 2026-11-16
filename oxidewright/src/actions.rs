@@ -278,31 +278,7 @@ impl From<Option<&str>> for SelectValues {
     }
 }
 
-/// An in-memory file for `set_input_files`.
-#[derive(Debug, Clone, PartialEq)]
-pub struct FilePayload {
-    /// File name.
-    pub name: String,
-    /// MIME type.
-    pub mime_type: String,
-    /// File contents.
-    pub buffer: Vec<u8>,
-}
-
-impl FilePayload {
-    /// A new payload.
-    pub fn new(
-        name: impl Into<String>,
-        mime_type: impl Into<String>,
-        buffer: impl Into<Vec<u8>>,
-    ) -> Self {
-        FilePayload {
-            name: name.into(),
-            mime_type: mime_type.into(),
-            buffer: buffer.into(),
-        }
-    }
-}
+pub use crate::fetch::FilePayload;
 
 /// Files for `set_input_files`: paths (files or a single directory) or
 /// in-memory payloads. An empty list clears the input.
@@ -428,7 +404,7 @@ pub(crate) fn prepare_input_files(files: &InputFiles) -> Result<InputFilesItems>
                         .map(|p| {
                             json!({
                                 "name": p.name,
-                                "mimeType": if p.mime_type.is_empty() { mime_type_for(&p.name).to_string() } else { p.mime_type.clone() },
+                                "mimeType": p.mime_type.clone().filter(|m| !m.is_empty()).unwrap_or_else(|| mime_type_for(&p.name).to_string()),
                                 "buffer": base64::engine::general_purpose::STANDARD.encode(&p.buffer),
                             })
                         })

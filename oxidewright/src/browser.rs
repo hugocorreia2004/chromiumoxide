@@ -205,6 +205,13 @@ impl BrowserInner {
         Ok(browser.get_page(target_id).await?)
     }
 
+    /// Read access to the chromiumoxide browser (`None` once closed).
+    pub(crate) async fn cdp_read(
+        &self,
+    ) -> tokio::sync::RwLockReadGuard<'_, Option<chromiumoxide::Browser>> {
+        self.cdp.read().await
+    }
+
     pub(crate) fn forget_page(&self, target_id: &str) {
         self.pages.lock().unwrap().remove(target_id);
     }
@@ -238,10 +245,7 @@ impl BrowserInner {
         let context = BrowserContext::new(
             None,
             self.self_weak.clone(),
-            NewContextOptions {
-                viewport: None,
-                ..NewContextOptions::default()
-            },
+            NewContextOptions::no_overrides(),
         );
         *self.default_context.lock().unwrap() = Some(context.clone());
         let default_id = self

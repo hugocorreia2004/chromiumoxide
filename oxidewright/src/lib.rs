@@ -41,14 +41,23 @@ pub mod actions;
 mod browser;
 mod browser_context;
 mod browser_type;
+mod cdp_raw;
+mod cdp_session;
+mod clock;
 mod console;
 mod context_ext;
+mod context_options;
+mod cookies;
+pub mod coverage;
 mod dialog;
 mod download;
 mod element_actions;
+pub mod emulation;
 mod error;
 mod events;
 pub mod execution_context;
+mod ext;
+pub mod fetch;
 mod file_chooser;
 mod frame;
 mod frame_selectors;
@@ -63,29 +72,49 @@ mod network;
 mod network_manager;
 mod page;
 mod page_ext;
+mod page_extras;
+mod pdf;
 mod progress;
 mod route;
+mod screenshot;
 mod selector_parser;
 mod selectors;
+mod storage_state;
 mod url_match;
 mod websocket;
 mod worker;
 
 pub use actions::{
-    Action, BoundingBox, Click, Dblclick, ElementState, FilePayload, Fill, Hover, InputFiles,
-    Position, Press, SelectOption, SelectOptionAction, SelectValue, SelectValues, SetChecked,
-    SetInputFiles, Tap, Type, WaitForSelector, kinds,
+    Action, BoundingBox, Click, Dblclick, ElementState, Fill, Hover, InputFiles, Position, Press,
+    SelectOption, SelectOptionAction, SelectValue, SelectValues, SetChecked, SetInputFiles, Tap,
+    Type, WaitForSelector, kinds,
 };
 pub use browser::Browser;
 pub use browser_context::{BrowserContext, NewContext, NewContextOptions};
 pub use browser_type::{BrowserType, ConnectOverCdp, Launch, LaunchOptions, chromium};
+pub use cdp_session::{CDPSession, CdpSessionTarget};
+pub use clock::{Clock, ClockInstall, ClockTicks, ClockTime};
 pub use console::{ConsoleMessage, ConsoleMessageLocation, WebError};
+pub use context_options::{Device, devices};
+pub use cookies::{ClearCookies, Cookie, Cookies, SameSite, SetCookie};
+pub use coverage::{
+    CoverageRange, CssCoverageEntry, FunctionCoverage, JsCoverageEntry, StartCssCoverage,
+    StartJsCoverage, TextRange,
+};
 pub use dialog::Dialog;
 pub use download::Download;
 pub use element_actions::WaitForSelectorState;
+pub use emulation::{
+    ColorScheme, Contrast, EmulateMedia, ForcedColors, Geolocation, GrantPermissions, Media,
+    ReducedMotion, ServiceWorkerPolicy,
+};
 pub use error::{CONTEXT_DESTROYED_MESSAGE, Error, Result, TARGET_CLOSED_MESSAGE};
 pub use events::{Event, EventKind, ListenerId, WaitForEvent};
 pub use execution_context::{ExecutionContext, World};
+pub use fetch::{
+    APIRequest, APIRequestContext, FilePayload, HttpCredentialsSend, MultipartValue, ProxySettings,
+    RequestData, request,
+};
 pub use file_chooser::FileChooser;
 pub use frame::{
     Frame, FrameEvaluate, FrameEvaluateHandle, Goto, LoadState, SetContent, WaitForLoadState,
@@ -107,12 +136,21 @@ pub use network::{
 };
 pub use network_manager::HttpCredentials;
 pub use page::{AddInitScript, GoHistory, InitScript, Page, Reload, ViewportSize};
+pub use page_extras::{AddTag, CloseContext, ClosePage};
+pub use pdf::{Pdf, PdfLength, PdfMargin};
 pub use progress::DEFAULT_TIMEOUT;
 pub use route::{
     APIResponse, Abort, Continue, Fallback, Fetch, Fulfill, Route, RouteBuilder, RouteHandlerFn,
     RouteId, Unroute, UnrouteAll, UnrouteBehavior,
 };
+pub use screenshot::{
+    Animations, Caret, ElementScreenshot, Mask, PageScreenshot, Rect, ScreenshotScale,
+    ScreenshotType,
+};
 pub use selectors::{Selectors, selectors};
+pub use storage_state::{
+    NameValue, OriginState, StorageState, StorageStateBuilder, StorageStateSource,
+};
 pub use url_match::{UrlMatch, glob_to_regex_pattern};
 pub use websocket::{WebSocket, WebSocketEvent, WebSocketPayload};
 pub use worker::{Worker, WorkerEvaluate};

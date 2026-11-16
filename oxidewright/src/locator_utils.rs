@@ -31,6 +31,17 @@ pub fn regex(source: impl AsRef<str>, flags: impl AsRef<str>) -> JsRegex {
 const FLAG_ORDER: &str = "dgimsuvy";
 
 impl JsRegex {
+    /// The equivalent Rust regular expression (flags `i`, `m` and `s`), if
+    /// the source is supported by the `regex` crate.
+    pub(crate) fn to_regex(&self) -> Option<Regex> {
+        regex::RegexBuilder::new(&self.source.replace(r"\/", "/"))
+            .case_insensitive(self.flags.contains('i'))
+            .multi_line(self.flags.contains('m'))
+            .dot_matches_new_line(self.flags.contains('s'))
+            .build()
+            .ok()
+    }
+
     /// A regular expression with JavaScript `source` and `flags`
     /// (any of `dgimsuvy`; other characters are ignored).
     pub fn new(source: impl AsRef<str>, flags: impl AsRef<str>) -> Self {

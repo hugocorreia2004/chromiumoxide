@@ -566,6 +566,11 @@ impl Locator {
         self.action("locator.elementHandle")
     }
 
+    /// [`Self::element_handle`] reporting errors as `api`.
+    pub(crate) fn element_handle_as(&self, api: &'static str) -> Action<kinds::ElementHandle> {
+        self.action(api)
+    }
+
     /// Handles to all matching elements.
     pub async fn element_handles(&self) -> Result<Vec<ElementHandle>> {
         async {
