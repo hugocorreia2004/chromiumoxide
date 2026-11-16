@@ -27,8 +27,8 @@ use serde_json::{Value, json};
 
 use crate::element_actions::{
     InputFilesItems, Perform, PointerAction, PointerOptions, Task, TaskOutput, WaitAfter,
-    WaitForSelectorState, element_state, is_visible_internal, not_attached,
-    retry_with_progress_if_not_connected, wait_for_function_on_selector, wait_for_selector,
+    WaitForSelectorState, element_state, is_visible_internal, retry_with_progress_if_not_connected,
+    wait_for_function_on_selector, wait_for_selector,
 };
 use crate::error::{Error, Result};
 use crate::execution_context::Evaluated;
@@ -576,6 +576,9 @@ pub(crate) struct Opts {
     pub(crate) mode: Option<String>,
 }
 
+/// A serialized evaluation argument and the handles it references.
+pub(crate) type SerializedArg = Option<(Value, Vec<JSHandle>)>;
+
 /// Positional arguments of actions.
 #[derive(Default)]
 pub(crate) struct Args {
@@ -583,7 +586,7 @@ pub(crate) struct Args {
     pub(crate) flag: bool,
     pub(crate) values: SelectValues,
     pub(crate) files: Option<InputFiles>,
-    pub(crate) arg: Option<Result<Option<(Value, Vec<JSHandle>)>>>,
+    pub(crate) arg: Option<Result<SerializedArg>>,
     pub(crate) other: Option<String>,
 }
 
@@ -2031,17 +2034,3 @@ macro_rules! selector_api {
 
 selector_api!(Frame, "frame", f => f.clone());
 selector_api!(Page, "page", p => p.main_frame());
-
-/// `elementHandle` evaluation helpers re-exported for locators.
-pub(crate) fn eval_handle_action<K>(
-    target: Target,
-    api: &'static str,
-    expression: String,
-) -> Action<K> {
-    Action::new(target, api).with_text(expression)
-}
-
-#[allow(dead_code)]
-fn _unused(_: JSHandle) -> Result<()> {
-    Err(not_attached())
-}

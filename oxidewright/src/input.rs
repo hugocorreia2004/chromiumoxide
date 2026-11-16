@@ -1023,19 +1023,6 @@ impl InputState {
         Ok(())
     }
 
-    /// `Mouse.click`.
-    pub(crate) async fn mouse_click(
-        &self,
-        x: f64,
-        y: f64,
-        button: MouseButton,
-        click_count: u32,
-        delay: Option<f64>,
-    ) -> Result<()> {
-        self.mouse_click_with_steps(x, y, button, click_count, delay, None)
-            .await
-    }
-
     /// `Mouse.click` with the `steps` option.
     pub(crate) async fn mouse_click_with_steps(
         &self,

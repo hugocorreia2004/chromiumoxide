@@ -21,8 +21,7 @@ use crate::js::serde_impl::to_wire;
 use crate::js_handle::{ElementHandle, JSHandle, rebase_handles};
 use crate::locator_generators::as_locator;
 use crate::selector_parser::{
-    ParsedSelector, parse_selector, split_selector_by_frame, stringify_selector,
-    visit_all_selector_parts,
+    split_selector_by_frame, stringify_selector, visit_all_selector_parts,
 };
 
 /// Marker returned by the injected callback when nothing matched.
@@ -117,7 +116,6 @@ const RETRIABLE_MESSAGES: &[&str] = &[
     "Execution context was destroyed",
     "Cannot find context with specified id",
     "Unable to adopt element handle from a different document",
-    "JSHandles can be evaluated only in the context they were created!",
     "Element is not attached to the DOM",
     "Failed to create the utility script",
 ];
@@ -132,6 +130,9 @@ pub(crate) fn is_non_retriable(err: &Error, frame: Option<&Frame>) -> bool {
             !RETRIABLE_MESSAGES.iter().any(|m| message.contains(m))
         }
         Error::Protocol { .. } => false,
+        // A detached child frame (while resolving a frame locator) is a plain
+        // error in Playwright: retried unless the frame we run in is detached.
+        Error::FrameDetached { .. } => frame.is_none(),
         _ => true,
     }
 }
@@ -528,7 +529,6 @@ pub(crate) struct CallOptions {
 
 /// Result of [`call_on_selector`].
 pub(crate) struct CallResult {
-    pub(crate) frame: Frame,
     pub(crate) frame_visible: bool,
     pub(crate) result: Evaluated,
 }
@@ -621,7 +621,13 @@ pub(crate) async fn call_on_selector(
         };
         let evaluated = match attempt.await {
             Ok(e) => e,
-            Err(e) if no_stall && !e.is_target_closed() => {
+            // Only stalls/transient failures of a candidate frame are skipped;
+            // strict mode violations and script errors are reported.
+            Err(e)
+                if no_stall
+                    && (resolved_frame.is_detached()
+                        || !is_non_retriable(&e, Some(&resolved_frame))) =>
+            {
                 tracing::debug!("skipping frame while resolving selector: {e}");
                 continue;
             }
@@ -643,7 +649,6 @@ pub(crate) async fn call_on_selector(
             ));
         }
         aggregated = Some(CallResult {
-            frame: resolved_frame,
             frame_visible,
             result: evaluated,
         });
@@ -686,7 +691,10 @@ pub(crate) async fn adopt_to_main(element: ElementHandle) -> Result<ElementHandl
     }
     let adopted = main.adopt_element(element.as_js_handle()).await;
     element.dispose().await;
-    adopted?.as_element().ok_or_else(|| {
+    let adopted = adopted?;
+    // Like Playwright's `ElementHandle` constructor: compute the preview.
+    adopted.initialize_node_preview();
+    adopted.as_element().ok_or_else(|| {
         Error::evaluation("Unable to adopt element handle from a different document")
     })
 }
@@ -775,11 +783,6 @@ pub(crate) async fn query_array_in_main_world(
             handle_of(call_function(&ctx, "() => []", vec![], false).await?)
         }
     }
-}
-
-/// Parse a selector (validation only), like `Selectors.parseSelector`.
-pub(crate) fn validate_selector(selector: &str) -> Result<ParsedSelector> {
-    parse_selector(selector).map_err(|e| invalid_selector(e.0))
 }
 
 /// `asLocator('javascript', selector)` for log lines.

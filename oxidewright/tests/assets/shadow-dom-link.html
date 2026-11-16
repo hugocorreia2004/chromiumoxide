@@ -1,0 +1,15 @@
+<!DOCTYPE html>
+<html>
+<body>
+<div id="container"></div>
+<script>
+  window.clickCount = 0;
+  const root = document.getElementById('container').attachShadow({ mode: 'open' });
+  root.innerHTML = '<a id="inner-link" href="#">Inner link</a>';
+  root.querySelector('a').addEventListener('click', event => {
+    event.preventDefault();
+    window.clickCount++;
+  });
+</script>
+</body>
+</html>

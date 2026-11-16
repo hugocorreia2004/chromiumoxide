@@ -119,6 +119,9 @@ pub(crate) struct PointerAction {
     pub(crate) name: &'static str,
     pub(crate) wait_for_enabled: bool,
     pub(crate) wait_after: WaitAfter,
+    /// Skips `page.performActionPreChecks` (locator handlers), which
+    /// oxidewright does not implement yet; kept to mirror dom.ts.
+    #[allow(dead_code)]
     pub(crate) skip_action_pre_checks: bool,
     pub(crate) perform: Perform,
 }
@@ -211,19 +214,6 @@ fn round_point(p: Position) -> Position {
     }
 }
 
-fn quad_to_rect(quad: &[Position]) -> BoundingBox {
-    let min_x = quad.iter().map(|p| p.x).fold(f64::INFINITY, f64::min);
-    let min_y = quad.iter().map(|p| p.y).fold(f64::INFINITY, f64::min);
-    let max_x = quad.iter().map(|p| p.x).fold(f64::NEG_INFINITY, f64::max);
-    let max_y = quad.iter().map(|p| p.y).fold(f64::NEG_INFINITY, f64::max);
-    BoundingBox {
-        x: min_x,
-        y: min_y,
-        width: max_x - min_x,
-        height: max_y - min_y,
-    }
-}
-
 fn quad_middle_point(quad: &[Position]) -> Position {
     let mut result = Position { x: 0.0, y: 0.0 };
     for p in quad {
@@ -245,7 +235,7 @@ fn compute_quad_area(quad: &[Position]) -> f64 {
 
 /// What a pointer target resolves to.
 enum PointResult {
-    Point(Position, BoundingBox),
+    Point(Position),
     Outcome(Outcome),
 }
 
@@ -482,10 +472,7 @@ impl ElementHandle {
         let Some(quad) = filtered.first() else {
             return Ok(PointResult::Outcome(Outcome::NotInViewport));
         };
-        Ok(PointResult::Point(
-            quad_middle_point(quad),
-            quad_to_rect(quad),
-        ))
+        Ok(PointResult::Point(quad_middle_point(quad)))
     }
 
     /// `_offsetPoint`.
@@ -506,13 +493,10 @@ impl ElementHandle {
         }
         let left = border.get("left").and_then(|v| v.as_f64()).unwrap_or(0.0);
         let top = border.get("top").and_then(|v| v.as_f64()).unwrap_or(0.0);
-        Ok(PointResult::Point(
-            Position {
-                x: bounding.x + left + offset.x,
-                y: bounding.y + top + offset.y,
-            },
-            bounding,
-        ))
+        Ok(PointResult::Point(Position {
+            x: bounding.x + left + offset.x,
+            y: bounding.y + top + offset.y,
+        }))
     }
 
     /// `_retryAction`.
@@ -795,7 +779,7 @@ impl ElementHandle {
             None => self.clickable_point().await?,
         };
         let point = match point {
-            PointResult::Point(point, _) => round_point(point),
+            PointResult::Point(point) => round_point(point),
             PointResult::Outcome(outcome) => return Ok(outcome),
         };
 
@@ -837,6 +821,10 @@ impl ElementHandle {
         }
 
         let wait_after = action.wait_after == WaitAfter::Yes;
+        // Navigations requested by the action stall evaluations in the frame
+        // (`raceAgainstEvaluationStallingEvents`): watch for them.
+        let mut navigation_rx = page.subscribe();
+        let frame_id = frame.id().to_string();
         let result = wait_for_signals_created_by(&page, progress, wait_after, async {
             let mut restore: Option<Vec<KeyboardModifier>> = None;
             if let Some(modifiers) = &options.modifiers {
@@ -879,8 +867,22 @@ impl ElementHandle {
             }
             if let Some(handle) = &interceptor {
                 if action.wait_after != WaitAfter::No {
-                    let stopped = handle.evaluate_inner("h => h.stop()", None, true).await;
-                    if let Ok(Evaluated::Value(v)) = stopped {
+                    let stalled = async {
+                        loop {
+                            match page.next_event(&mut navigation_rx).await {
+                                Ok(PageEvent::NavigationRequested(id)) if id == frame_id => {
+                                    return;
+                                }
+                                Ok(_) => {}
+                                Err(_) => return,
+                            }
+                        }
+                    };
+                    let stopped = tokio::select! {
+                        stopped = handle.evaluate_inner("h => h.stop()", None, true) => Some(stopped),
+                        _ = stalled => None,
+                    };
+                    if let Some(Ok(Evaluated::Value(v))) = stopped {
                         let outcome = parse_outcome(&v);
                         if outcome != Outcome::Done {
                             return Ok(outcome);
@@ -1492,7 +1494,9 @@ pub(crate) async fn retry_with_progress_if_not_connected(
                 return Ok(None);
             };
             let output = element.run_task(progress, task, resolved.frame_visible).await;
-            element.dispose().await;
+            // Not awaited, like Playwright: a navigation started by the action
+            // may stall protocol calls to the renderer.
+            tokio::spawn(async move { element.dispose().await });
             match output? {
                 TaskOutput::NotConnected => {
                     progress.log("element was detached from the DOM, retrying");
@@ -1653,15 +1657,17 @@ pub(crate) async fn wait_for_selector(
     let mut backoff = Backoff::new(progress.timeout());
     loop {
         backoff.wait().await;
-        let attempt = async {
-            if let Some(scope) = &target.scope {
-                let connected = scope
-                    .eval_in_utility("(injected, node) => node.isConnected", Value::Null)
-                    .await?;
-                if connected.and_then(|v| v.as_bool()) != Some(true) {
-                    return Err(non_recoverable("Element is not attached to the DOM (scope)"));
-                }
+        // A detached scope is a `NonRecoverableDOMError`: fail right away
+        // (its message would otherwise be considered retriable).
+        if let Some(scope) = &target.scope {
+            let connected = scope
+                .eval_in_utility("(injected, node) => node.isConnected", Value::Null)
+                .await?;
+            if connected.and_then(|v| v.as_bool()) != Some(true) {
+                return Err(non_recoverable("Element is not attached to the DOM"));
             }
+        }
+        let attempt = async {
             let resolved = call_on_selector(
                 frame,
                 target,

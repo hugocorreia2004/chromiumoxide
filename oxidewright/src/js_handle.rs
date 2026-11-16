@@ -80,7 +80,7 @@ impl JSHandle {
 
     /// Like Playwright's `ElementHandle._initializePreview`: compute
     /// `JSHandle@<tag ...>` in the background.
-    fn initialize_node_preview(&self) {
+    pub(crate) fn initialize_node_preview(&self) {
         let handle = self.clone();
         if tokio::runtime::Handle::try_current().is_err() {
             return;
@@ -472,6 +472,17 @@ impl ElementHandle {
     /// The frame this `<iframe>`/`<frame>` element hosts, if any.
     pub async fn content_frame(&self) -> Result<Option<Frame>> {
         async {
+            // `_isIframeElement`: only <iframe>/<frame> elements host frames.
+            let is_frame = self
+                .evaluate_inner(
+                    "node => !!node && (node.nodeName === 'IFRAME' || node.nodeName === 'FRAME')",
+                    None,
+                    true,
+                )
+                .await?;
+            if !matches!(is_frame, Evaluated::Value(JsValue::Bool(true))) {
+                return Ok(None);
+            }
             let node = self.describe().await?;
             let Some(frame_id) = node.frame_id else {
                 return Ok(None);

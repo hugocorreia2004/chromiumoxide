@@ -1,0 +1,11 @@
+<!DOCTYPE html>
+<script>
+  window.result = 'Not moved';
+  window.addEventListener('devicemotion', e => {
+    window.result = 'Moved';
+    window.acceleration = { x: e.acceleration.x, y: e.acceleration.y, z: e.acceleration.z };
+    window.accelerationIncludingGravity = { x: e.accelerationIncludingGravity.x, y: e.accelerationIncludingGravity.y, z: e.accelerationIncludingGravity.z };
+    window.rotationRate = { alpha: e.rotationRate.alpha, beta: e.rotationRate.beta, gamma: e.rotationRate.gamma };
+    window.interval = e.interval;
+  });
+</script>
