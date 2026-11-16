@@ -1570,7 +1570,7 @@ impl ElementHandle {
         self.action("elementHandle.type").with_text(text)
     }
 
-    /// Alias of [`ElementHandle::r#type`].
+    /// Alias of `ElementHandle::type` (`r#type`).
     pub fn type_text(&self, text: impl Into<String>) -> Type {
         self.r#type(text)
     }

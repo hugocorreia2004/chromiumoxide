@@ -99,6 +99,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Check examples
         run: cargo check --examples --features fetcher,zip8,rustls
+      - name: Check oxidewright examples
+        run: cargo check -p oxidewright --examples
 
   oxidewright:
     name: oxidewright (${{ matrix.os }})
