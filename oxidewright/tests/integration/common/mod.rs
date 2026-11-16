@@ -72,7 +72,7 @@ where
             server,
         };
         let result = tokio::time::timeout(Duration::from_secs(60), tokio::spawn(f(ctx))).await;
-        let _ = browser.close().await;
+        let _ = tokio::time::timeout(Duration::from_secs(20), browser.close()).await;
         match result {
             Ok(Ok(())) => {}
             Ok(Err(join_error)) => std::panic::resume_unwind(join_error.into_panic()),
@@ -94,6 +94,31 @@ pub struct TestServer {
     requests: Arc<Mutex<HashMap<String, Arc<Notify>>>>,
     seen: Arc<Mutex<Vec<String>>>,
     headers: Arc<Mutex<HashMap<String, axum::http::HeaderMap>>>,
+    last: Arc<Mutex<HashMap<String, ServerRequest>>>,
+    auth: Arc<Mutex<HashMap<String, (String, String)>>>,
+}
+
+/// A request received by the test server.
+#[derive(Clone, Debug)]
+pub struct ServerRequest {
+    pub method: String,
+    pub path: String,
+    pub headers: axum::http::HeaderMap,
+    pub body: Vec<u8>,
+}
+
+impl ServerRequest {
+    /// A header value as a string.
+    pub fn header(&self, name: &str) -> Option<String> {
+        self.headers
+            .get(name)
+            .map(|v| v.to_str().unwrap_or_default().to_string())
+    }
+
+    /// The body as text.
+    pub fn text(&self) -> String {
+        String::from_utf8_lossy(&self.body).into_owned()
+    }
 }
 
 fn assets_dir() -> PathBuf {
@@ -127,6 +152,8 @@ impl TestServer {
             requests: Arc::default(),
             seen: Arc::default(),
             headers: Arc::default(),
+            last: Arc::default(),
+            auth: Arc::default(),
         };
         let state = server.clone();
         let app = axum::Router::new().fallback(move |req: Request| {
@@ -141,11 +168,36 @@ impl TestServer {
 
     async fn handle(&self, req: Request) -> Response {
         let path = req.uri().path().to_string();
+        let path_and_query = req
+            .uri()
+            .path_and_query()
+            .map(|p| p.as_str().to_string())
+            .unwrap_or_else(|| path.clone());
         self.seen.lock().unwrap().push(path.clone());
         self.headers
             .lock()
             .unwrap()
             .insert(path.clone(), req.headers().clone());
+        let (parts, body) = req.into_parts();
+        let bytes = axum::body::to_bytes(body, usize::MAX)
+            .await
+            .map(|b| b.to_vec())
+            .unwrap_or_default();
+        let record = ServerRequest {
+            method: parts.method.to_string(),
+            path: path_and_query.clone(),
+            headers: parts.headers.clone(),
+            body: bytes.clone(),
+        };
+        self.last
+            .lock()
+            .unwrap()
+            .insert(path.clone(), record.clone());
+        self.last
+            .lock()
+            .unwrap()
+            .insert(path_and_query.clone(), record);
+        let req = Request::from_parts(parts, Body::from(bytes));
         let notify = self
             .requests
             .lock()
@@ -155,7 +207,36 @@ impl TestServer {
             .clone();
         notify.notify_waiters();
         notify.notify_one();
-        let route = self.routes.lock().unwrap().get(&path).cloned();
+        let auth = self.auth.lock().unwrap().get(&path).cloned();
+        if let Some((user, pass)) = auth {
+            let expected = format!(
+                "Basic {}",
+                base64::Engine::encode(
+                    &base64::engine::general_purpose::STANDARD,
+                    format!("{user}:{pass}")
+                )
+            );
+            let given = req
+                .headers()
+                .get(header::AUTHORIZATION)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or_default()
+                .to_string();
+            if given != expected {
+                return Response::builder()
+                    .status(StatusCode::UNAUTHORIZED)
+                    .header(header::WWW_AUTHENTICATE, "Basic realm=\"Secure Area\"")
+                    .body(Body::from("HTTP Error 401 Unauthorized: Access is denied"))
+                    .unwrap();
+            }
+        }
+        let route = {
+            let routes = self.routes.lock().unwrap();
+            routes
+                .get(&path_and_query)
+                .or_else(|| routes.get(&path))
+                .cloned()
+        };
         if let Some(route) = route {
             return route(req).await;
         }
@@ -245,7 +326,7 @@ impl TestServer {
     }
 
     /// Resolves when the server receives a request for `path`.
-    pub async fn wait_for_request(&self, path: &str) {
+    pub async fn wait_for_request(&self, path: &str) -> ServerRequest {
         let notify = self
             .requests
             .lock()
@@ -254,6 +335,35 @@ impl TestServer {
             .or_insert_with(|| Arc::new(Notify::new()))
             .clone();
         notify.notified().await;
+        self.last
+            .lock()
+            .unwrap()
+            .get(path)
+            .cloned()
+            .expect("request recorded")
+    }
+
+    /// Require HTTP basic authentication for `path`.
+    pub fn set_auth(&self, path: &str, user: &str, pass: &str) {
+        self.auth
+            .lock()
+            .unwrap()
+            .insert(path.to_string(), (user.to_string(), pass.to_string()));
+    }
+
+    /// Redirect `from` to `to` with the given status.
+    pub fn set_redirect_status(&self, from: &str, to: &str, status: u16) {
+        let to = to.to_string();
+        self.set_route(from, move |_| {
+            let to = to.clone();
+            async move {
+                Response::builder()
+                    .status(status)
+                    .header(header::LOCATION, HeaderValue::from_str(&to).unwrap())
+                    .body(Body::empty())
+                    .unwrap()
+            }
+        });
     }
 
     /// Headers of the last request for `path`.
@@ -355,4 +465,33 @@ pub fn assert_err_contains<T: std::fmt::Debug>(
             e
         }
     }
+}
+
+/// A WebSocket server on `/ws` echoing every message; returns its port.
+pub async fn start_ws_echo_server() -> u16 {
+    use axum::extract::ws::{Message, WebSocketUpgrade};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let app = axum::Router::new().route(
+        "/ws",
+        axum::routing::get(|ws: WebSocketUpgrade| async move {
+            ws.on_upgrade(|mut socket| async move {
+                while let Some(Ok(message)) = socket.recv().await {
+                    match message {
+                        Message::Text(_) | Message::Binary(_) => {
+                            if socket.send(message).await.is_err() {
+                                break;
+                            }
+                        }
+                        Message::Close(_) => break,
+                        _ => {}
+                    }
+                }
+            })
+        }),
+    );
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    port
 }

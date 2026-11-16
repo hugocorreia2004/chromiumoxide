@@ -26,6 +26,20 @@ pub struct NewContextOptions {
     pub viewport: Option<ViewportSize>,
     /// Base URL used to resolve relative URLs of `goto`, `wait_for_url`, ...
     pub base_url: Option<String>,
+    /// Extra HTTP headers sent with every request.
+    pub extra_http_headers: Vec<crate::Header>,
+    /// Emulate a disconnected network.
+    pub offline: bool,
+    /// Credentials for HTTP authentication.
+    pub http_credentials: Option<crate::HttpCredentials>,
+    /// Ignore HTTPS errors.
+    pub ignore_https_errors: bool,
+    /// Accept downloads (default `true`).
+    pub accept_downloads: bool,
+    /// Record a HAR file.
+    pub record_har: Option<crate::RecordHar>,
+    /// Report `console`/`pageerror` events (enables `Runtime`, not stealthy).
+    pub console_events: bool,
 }
 
 impl Default for NewContextOptions {
@@ -36,6 +50,13 @@ impl Default for NewContextOptions {
                 height: 720,
             }),
             base_url: None,
+            extra_http_headers: Vec::new(),
+            offline: false,
+            http_credentials: None,
+            ignore_https_errors: false,
+            accept_downloads: true,
+            record_har: None,
+            console_events: false,
         }
     }
 }
@@ -51,6 +72,8 @@ pub(crate) struct ContextInner {
     pub(crate) browser: Weak<BrowserInner>,
     pub(crate) options: NewContextOptions,
     pub(crate) timeouts: Arc<TimeoutSettings>,
+    /// Events, routes, network options (see `context_ext.rs`).
+    pub(crate) ext: crate::context_ext::ContextExt,
     pages: Mutex<Vec<Page>>,
     init_scripts: Mutex<Vec<String>>,
     closed: AtomicBool,
@@ -89,6 +112,7 @@ impl BrowserContext {
             inner: Arc::new(ContextInner {
                 id,
                 browser,
+                ext: crate::context_ext::ContextExt::new(&options),
                 options,
                 timeouts: Arc::new(TimeoutSettings::new(None)),
                 pages: Mutex::new(Vec::new()),
@@ -124,8 +148,18 @@ impl BrowserContext {
 
     /// Wrap a chromiumoxide page of this context and track it.
     pub(crate) async fn adopt_page(&self, cdp: chromiumoxide::Page) -> Result<Page> {
+        self.adopt_page_with_opener(cdp, None).await
+    }
+
+    /// Like `adopt_page`, for a popup of `opener`.
+    pub(crate) async fn adopt_page_with_opener(
+        &self,
+        cdp: chromiumoxide::Page,
+        opener: Option<Weak<PageInner>>,
+    ) -> Result<Page> {
         let browser = self.browser_inner()?;
         let inner = PageInner::attach(cdp, Arc::downgrade(&browser), self).await?;
+        *inner.ext.opener.lock().unwrap() = opener;
         let page = Page::from_inner(inner);
         if let Some(viewport) = self.inner.options.viewport {
             page.inner.apply_viewport(viewport).await?;
@@ -134,8 +168,13 @@ impl BrowserContext {
         for script in scripts {
             page.inner.add_init_script_source(script).await?;
         }
+        crate::page_ext::initialize(&page, self).await?;
         browser.remember_page(&page);
         self.inner.pages.lock().unwrap().push(page.clone());
+        self.inner
+            .ext
+            .listeners
+            .emit(crate::events::Event::Page(page.clone()));
         Ok(page)
     }
 
@@ -203,6 +242,10 @@ impl BrowserContext {
     /// Close the context and all its pages.
     pub async fn close(&self) -> Result<()> {
         async {
+            if self.inner.closed.load(Ordering::SeqCst) {
+                return Ok(());
+            }
+            let har = crate::har::flush_context(self).await;
             if self.inner.closed.swap(true, Ordering::SeqCst) {
                 return Ok(());
             }
@@ -226,7 +269,8 @@ impl BrowserContext {
             if let Some(browser) = browser {
                 browser.forget_context(self);
             }
-            Ok(())
+            self.emit_closed();
+            har
         }
         .await
         .api("browserContext.close")
