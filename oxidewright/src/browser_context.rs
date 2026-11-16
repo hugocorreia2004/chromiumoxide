@@ -148,7 +148,7 @@ pub(crate) struct ContextInner {
     pub(crate) timeouts: Arc<TimeoutSettings>,
     /// Events, routes, network options (see `context_ext.rs`).
     pub(crate) ext: crate::context_ext::ContextExt,
-    pages: Mutex<Vec<Page>>,
+    pub(crate) pages: Mutex<Vec<Page>>,
     init_scripts: Mutex<Vec<String>>,
     closed: AtomicBool,
     pub(crate) emu: crate::ext::ContextExt,
