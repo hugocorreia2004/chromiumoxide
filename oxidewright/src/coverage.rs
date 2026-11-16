@@ -99,6 +99,7 @@ struct CssData {
 }
 
 /// Coverage state of a page.
+#[allow(clippy::type_complexity)]
 #[derive(Default)]
 pub(crate) struct CoverageState {
     js: Option<(Arc<Mutex<JsData>>, Vec<tokio::task::JoinHandle<()>>, bool)>,

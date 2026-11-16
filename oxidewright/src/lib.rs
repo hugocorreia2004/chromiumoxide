@@ -49,6 +49,7 @@ pub mod emulation;
 mod error;
 pub mod execution_context;
 mod ext;
+pub mod fetch;
 mod frame;
 pub mod js;
 mod js_handle;
@@ -76,6 +77,10 @@ pub use emulation::{
 };
 pub use error::{CONTEXT_DESTROYED_MESSAGE, Error, Result, TARGET_CLOSED_MESSAGE};
 pub use execution_context::{ExecutionContext, World};
+pub use fetch::{
+    APIRequest, APIRequestContext, APIResponse, FilePayload, HttpCredentials, HttpCredentialsSend,
+    MultipartValue, ProxySettings, RequestData, request,
+};
 pub use frame::{
     Frame, FrameEvaluate, FrameEvaluateHandle, Goto, LoadState, SetContent, WaitForLoadState,
     WaitForNavigation, WaitForUrl,
