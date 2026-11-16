@@ -19,6 +19,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `Page::wait_for_navigation` and `Page::wait_for_navigation_response` fail with
   `CdpError::Timeout` after the configured request timeout instead of waiting
   forever
+- `goto` (and `Browser::new_page(url)`) now resolve on the navigated frame's own
+  `load`, as in Playwright: they no longer wait for subframes the browser does not
+  fold into that event, such as out-of-process iframes. Use
+  `Page::wait_for_navigation_until(LifecycleEvent::NetworkIdle)` or the frame APIs
+  to wait for them
 - Generated protocol types: every struct and enum now implements `Default`,
   enums implement `Deserialize` by hand, and `NavigationError` has a new
   `Failed` variant
