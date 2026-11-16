@@ -336,6 +336,14 @@ async fn wait_for_frame(
     .unwrap_or_else(|_| panic!("timed out waiting for {description}"))
 }
 
+fn url_path_is(frame: &Frame, path: &str) -> bool {
+    frame.url().is_some_and(|url| {
+        url::Url::parse(&url)
+            .map(|url| url.path() == path)
+            .unwrap_or(false)
+    })
+}
+
 async fn wait_for_url(page: &Page, path: &str) -> Frame {
     wait_for_frame(page, path, |frame| {
         frame.url().is_some_and(|url| {
@@ -825,10 +833,24 @@ async fn frame_api_supports_nested_oopif_navigation_and_stale_handles() {
         assert!(!main.is_out_of_process());
         assert_eq!(main.session_id(), page.session_id());
 
-        let child = wait_for_url(&page, "/child").await;
+        // `goto` does not wait for out-of-process descendants, so wait for
+        // each frame to be bound to its final session before taking a handle
+        // (a handle pinned to a transient binding would turn stale).
+        let child = wait_for_frame(&page, "/child bound out of process", |frame| {
+            frame.is_out_of_process() && url_path_is(frame, "/child")
+        })
+        .await;
         let same = wait_for_url(&page, "/same").await;
-        let same_descendant = wait_for_url(&page, "/same-descendant").await;
-        let nested = wait_for_url(&page, "/nested").await;
+        let same_descendant = wait_for_frame(&page, "/same-descendant in the child", |frame| {
+            frame.session_id() == child.session_id() && url_path_is(frame, "/same-descendant")
+        })
+        .await;
+        let nested = wait_for_frame(&page, "/nested bound to its own session", |frame| {
+            frame.is_out_of_process()
+                && frame.session_id() != child.session_id()
+                && url_path_is(frame, "/nested")
+        })
+        .await;
         assert!(child.is_out_of_process());
         assert_ne!(child.session_id(), page.session_id());
         assert_eq!(same.session_id(), page.session_id());
