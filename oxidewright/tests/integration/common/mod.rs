@@ -50,35 +50,46 @@ where
         .worker_threads(2)
         .build()
         .expect("tokio runtime");
-    runtime.block_on(async move {
-        let browser = launch_browser().await;
-        let server = TestServer::start().await;
-        let setup = async {
-            let context = browser.new_context().await?;
-            let page = context.new_page().await?;
-            Ok::<_, oxidewright::Error>((context, page))
+    // Everything, setup included, runs under one deadline, and the runtime is
+    // shut down with a timeout: a stuck task (or a blocking call) used to keep
+    // the whole test binary alive for hours on CI instead of failing the test.
+    let outcome = runtime.block_on(async move {
+        let body = async move {
+            let browser = launch_browser().await;
+            let server = TestServer::start().await;
+            let setup = async {
+                let context = browser.new_context().await?;
+                let page = context.new_page().await?;
+                Ok::<_, oxidewright::Error>((context, page))
+            };
+            let (context, page) = match setup.await {
+                Ok(v) => v,
+                Err(e) => {
+                    let _ = browser.close().await;
+                    panic!("test setup failed: {e}");
+                }
+            };
+            let ctx = TestContext {
+                browser: browser.clone(),
+                context,
+                page,
+                server,
+            };
+            let result = tokio::time::timeout(Duration::from_secs(60), tokio::spawn(f(ctx))).await;
+            let _ = tokio::time::timeout(Duration::from_secs(20), browser.close()).await;
+            result
         };
-        let (context, page) = match setup.await {
-            Ok(v) => v,
-            Err(e) => {
-                let _ = browser.close().await;
-                panic!("test setup failed: {e}");
-            }
-        };
-        let ctx = TestContext {
-            browser: browser.clone(),
-            context,
-            page,
-            server,
-        };
-        let result = tokio::time::timeout(Duration::from_secs(60), tokio::spawn(f(ctx))).await;
-        let _ = tokio::time::timeout(Duration::from_secs(20), browser.close()).await;
-        match result {
-            Ok(Ok(())) => {}
-            Ok(Err(join_error)) => std::panic::resume_unwind(join_error.into_panic()),
-            Err(_) => panic!("test timed out after 60s"),
-        }
+        tokio::time::timeout(Duration::from_secs(150), tokio::spawn(body)).await
     });
+    runtime.shutdown_timeout(Duration::from_secs(5));
+    match outcome {
+        Ok(Ok(Ok(Ok(())))) => {}
+        Ok(Ok(Ok(Err(join_error)))) | Ok(Err(join_error)) => {
+            std::panic::resume_unwind(join_error.into_panic())
+        }
+        Ok(Ok(Err(_))) => panic!("test timed out after 60s"),
+        Err(_) => panic!("test (including setup and teardown) timed out after 150s"),
+    }
 }
 
 #[derive(Clone)]
