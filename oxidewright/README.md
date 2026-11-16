@@ -67,6 +67,39 @@ Implemented: `chromium()`, `BrowserType::{launch, connect_over_cdp}`, `Browser`,
 `BrowserContext`, `Page` and `Frame` navigation/evaluation/hierarchy, `JSHandle` and
 `ElementHandle` basics, `Request`/`Response` of navigations.
 
+Emulation and capture:
+
+* every context option of `browser.new_context()` that changes what pages see: `viewport`
+  (`None` = no override), `screen`, `device_scale_factor`, `is_mobile`, `has_touch`,
+  `user_agent`, `locale`, `timezone_id`, `geolocation`, `permissions`, `color_scheme`,
+  `reduced_motion`, `forced_colors`, `contrast`, `java_script_enabled`, `bypass_csp`,
+  `ignore_https_errors`, `accept_downloads`, `base_url`, `strict_selectors`,
+  `service_workers`, `storage_state`, and `.device(&devices()["iPhone 13"])`;
+* `page.set_viewport_size`, `page.emulate_media`, `context.set_geolocation`,
+  `grant_permissions`/`clear_permissions`;
+* cookies (`cookies`, `add_cookies`, `clear_cookies` with filters) and storage state
+  (`storage_state()`, the `storage_state` option, `set_storage_state`), JSON-compatible
+  with Playwright's files;
+* `page.screenshot()` / `element_handle.screenshot()` with every option (`path`, `type`,
+  `quality`, `full_page`, `clip`, `omit_background`, `animations`, `caret`, `scale`,
+  `mask`, `mask_color`, `style`, `timeout`); the page is never brought to front;
+* `page.pdf()`, `page.clock()` (Playwright's fake timers), JS/CSS coverage,
+  `add_script_tag`/`add_style_tag`, `opener`, `close().reason(..)` /
+  `.run_before_unload(true)`, `context.new_cdp_session` and
+  `browser.new_browser_cdp_session`.
+
+### Emulation and stealth
+
+Every emulation override is observable by pages, so oxidewright only sends one when the
+corresponding option is set. Contexts created with `browser.new_context()` keep Playwright's
+default 1280x720 viewport (use `.viewport(None)` to keep the window size); the default
+context of `connect_over_cdp` overrides nothing. Unlike Playwright, media features are not
+forced to `light`/`no-preference` when unset, so pages see the browser's real preferences.
+Context options are applied to the page's own session; out-of-process iframes run in other
+renderers and are not emulated separately yet. JS coverage enables the `Debugger` and
+`Profiler` domains and CDP sessions share the page session: both are visible to a page that
+looks for them.
+
 Planned: locators, actions and selectors; network routing and events; keyboard, mouse and
 touch; dialogs, downloads, workers and the rest of the Playwright API.
 

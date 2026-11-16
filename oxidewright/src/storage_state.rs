@@ -337,7 +337,9 @@ pub(crate) async fn set_storage_state(
             let helper = BlankOriginsPage::open(context).await?;
             let restored: Result<()> = async {
                 for origin in &origins {
-                    helper.page.goto(origin.clone()).await?;
+                    helper.page.goto(origin.clone()).await.map_err(|e| {
+                        Error::navigation(format!("{} (origin: {origin})", e.message()))
+                    })?;
                     let data = state
                         .origins
                         .iter()

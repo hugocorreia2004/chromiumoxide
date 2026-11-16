@@ -41,6 +41,7 @@ mod browser;
 mod browser_context;
 mod browser_type;
 mod cdp_raw;
+mod cdp_session;
 mod clock;
 mod context_options;
 mod cookies;
@@ -57,12 +58,14 @@ mod page;
 mod page_extras;
 mod pdf;
 mod progress;
+mod screenshot;
 mod storage_state;
 mod url_match;
 
 pub use browser::Browser;
 pub use browser_context::{BrowserContext, NewContext, NewContextOptions};
 pub use browser_type::{BrowserType, ConnectOverCdp, Launch, LaunchOptions, chromium};
+pub use cdp_session::{CDPSession, CdpSessionTarget};
 pub use clock::{Clock, ClockInstall, ClockTicks, ClockTime};
 pub use context_options::{Device, devices};
 pub use cookies::{ClearCookies, Cookie, Cookies, SameSite, SetCookie, TextMatch};
@@ -87,6 +90,10 @@ pub use page::{AddInitScript, GoHistory, InitScript, Page, Reload, ViewportSize}
 pub use page_extras::{AddTag, CloseContext, ClosePage};
 pub use pdf::{Pdf, PdfLength, PdfMargin};
 pub use progress::DEFAULT_TIMEOUT;
+pub use screenshot::{
+    Animations, Caret, ElementScreenshot, Mask, PageScreenshot, Rect, ScreenshotScale,
+    ScreenshotType,
+};
 pub use storage_state::{
     NameValue, OriginState, StorageState, StorageStateBuilder, StorageStateSource,
 };
