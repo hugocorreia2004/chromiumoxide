@@ -684,7 +684,17 @@ fn on_request(
             is_favicon,
             timestamp: *ev.timestamp.inner(),
             wall_time: *ev.wall_time.inner(),
-            session: Mutex::new(frame.cdp_frame_now().map(|f| f.session_id().clone())),
+            // The frame's chromiumoxide handle can still be unresolved right
+            // after the page is created: fall back to the page's own session
+            // (the one that reported the request), never to the browser
+            // session, where `Network.getResponseBody` and friends do not
+            // exist.
+            session: Mutex::new(Some(
+                frame
+                    .cdp_frame_now()
+                    .map(|f| f.session_id().clone())
+                    .unwrap_or_else(|| page.cdp.session_id().clone()),
+            )),
             route: route_for_request,
             state: Mutex::new(RequestState {
                 response_end: -1.0,
