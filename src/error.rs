@@ -46,6 +46,10 @@ pub enum CdpError {
     LaunchIo(#[source] io::Error, BrowserStderr),
     #[error("Request timed out.")]
     Timeout,
+    /// The page (target) was closed or destroyed, or the connection to the
+    /// browser ended, before the operation could complete.
+    #[error("The target was closed.")]
+    TargetClosed,
     #[error("FrameId {0:?} not found.")]
     FrameNotFound(FrameId),
     /// The frame still has an identity, but its captured CDP session is no
@@ -105,11 +109,30 @@ impl From<SendError> for CdpError {
     }
 }
 
+/// Map a failed send on a page's own channel to [`CdpError::TargetClosed`]:
+/// the target closes that channel when it is torn down.
+pub(crate) trait TargetChannelResult<T> {
+    fn or_target_closed(self) -> Result<T>;
+}
+
+impl<T> TargetChannelResult<T> for std::result::Result<T, SendError> {
+    fn or_target_closed(self) -> Result<T> {
+        self.map_err(|err| {
+            if err.is_disconnected() {
+                CdpError::TargetClosed
+            } else {
+                err.into()
+            }
+        })
+    }
+}
+
 impl From<NavigationError> for CdpError {
     fn from(err: NavigationError) -> Self {
         match err {
             NavigationError::Timeout { .. } => CdpError::Timeout,
             NavigationError::FrameNotFound { frame, .. } => CdpError::FrameNotFound(frame),
+            NavigationError::Failed { error_text, .. } => CdpError::ChromeMessage(error_text),
         }
     }
 }

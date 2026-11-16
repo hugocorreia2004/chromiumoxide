@@ -22,6 +22,7 @@ fn generated_code_is_fresh() {
         .experimental(env::var("CDP_NO_EXPERIMENTAL").is_err())
         .deprecated(env::var("CDP_DEPRECATED").is_ok())
         .allowed_deprecated_type("emulateNetworkConditions")
+        .custom_default_type("Target.CreateTargetParams")
         .compile_pdls(&[js_proto, browser_proto])
         .unwrap();
 

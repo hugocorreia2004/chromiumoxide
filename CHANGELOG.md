@@ -7,6 +7,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- `Page::screenshot` no longer brings the page to the front before the capture;
+  set `ScreenshotParams::activate` (or `ScreenshotParamsBuilder::activate(true)`)
+  to keep the old behavior. `ScreenshotParams` gained the public field
+  `activate` (mattsse/chromiumoxide#308)
+- Operations on a page whose target was closed or destroyed now fail with the new
+  `CdpError::TargetClosed` instead of `NoResponse`, `FrameNotReady` or a channel
+  send error (mattsse/chromiumoxide#14)
+- `Page::wait_for_navigation` and `Page::wait_for_navigation_response` fail with
+  `CdpError::Timeout` after the configured request timeout instead of waiting
+  forever
+- `goto` (and `Browser::new_page(url)`) now resolve on the navigated frame's own
+  `load`, as in Playwright: they no longer wait for subframes the browser does not
+  fold into that event, such as out-of-process iframes. Use
+  `Page::wait_for_navigation_until(LifecycleEvent::NetworkIdle)` or the frame APIs
+  to wait for them
+- Generated protocol types: every struct and enum now implements `Default`,
+  enums implement `Deserialize` by hand, and `NavigationError` has a new
+  `Failed` variant
+
+### Added
+
+- `Page::wait_for_navigation_until(LifecycleEvent)`, e.g. to wait for
+  `LifecycleEvent::NetworkIdle` (mattsse/chromiumoxide#36); `LifecycleEvent` is
+  re-exported at the crate root
+
+### Fixed
+
+- Protocol deserialization is tolerant: missing fields fall back to their
+  default (mattsse/chromiumoxide#335), enum values unknown to this protocol
+  revision map to the enum's default (or `None` for optional fields), and an
+  event whose params cannot be read arrives as `CdpEvent::Other` instead of
+  failing the whole message (mattsse/chromiumoxide#266). The approach is ported
+  from [spider-rs/chromey](https://github.com/spider-rs/chromey) (Apache-2.0)
+- Mandatory arrays are serialized even when empty, so `Browser::set_cookies(vec![])`
+  is accepted by the browser; browser-level requests (`Browser::execute`,
+  `clear_cookies`, `pages`, `close`, ...) fail with `CdpError::Timeout` instead of
+  hanging when no response arrives, and the browser cookie methods use the
+  browser's context (mattsse/chromiumoxide#293)
+- `goto` completes on the navigated frame's own `load` (a late, lazy or never
+  finishing subframe no longer holds it back), fails as soon as the navigation
+  request fails (`Network.loadingFailed`) or the frame stops loading without
+  committing, and `Frame::goto` uses the configured request timeout
+  (mattsse/chromiumoxide#125, mattsse/chromiumoxide#191). `Browser::new_page`
+  hands the page over after the request timeout even if its first document never
+  fires `load`
+- `Page::close` resolves once the target is gone; afterwards pending waiters and
+  commands of the page, its frames and elements fail with
+  `CdpError::TargetClosed` and its event streams end (mattsse/chromiumoxide#14)
+- When the websocket connection ends, the handler settles every pending request,
+  refuses new ones and keeps returning `None`; a `Browser::close` whose
+  connection drops before the reply succeeds, and the end of the connection after
+  `Browser::close` is no longer logged as an error (mattsse/chromiumoxide#65,
+  mattsse/chromiumoxide#287)
+
 - Add `add_init_script` to `Page` for scripts before navigation
 ### Added
 

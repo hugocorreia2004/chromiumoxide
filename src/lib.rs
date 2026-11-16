@@ -75,6 +75,7 @@ pub use crate::error::Result;
 pub use crate::fetcher::{BrowserFetcher, BrowserFetcherOptions};
 pub use crate::frame::Frame;
 pub use crate::handler::Handler;
+pub use crate::handler::frame::LifecycleEvent;
 pub use crate::page::{
     ContinueRequestOverrides, FulfillResponse, Page, PausedRequest, PausedRequestStream,
 };
