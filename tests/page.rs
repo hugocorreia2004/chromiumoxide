@@ -26,7 +26,7 @@ async fn test_evaluate_on_new_document() {
             .expect("should navigate to www.google.com");
 
         let result: i32 = page
-            .evaluate("window.testValue")
+            .evaluate_main_world("window.testValue")
             .await
             .expect("should evaluate window.testValue")
             .into_value()
@@ -54,7 +54,7 @@ async fn test_add_init_script() {
             .expect("should navigate to www.google.com");
 
         let result: i32 = page
-            .evaluate("window.testValue")
+            .evaluate_main_world("window.testValue")
             .await
             .expect("should evaluate window.testValue")
             .into_value()

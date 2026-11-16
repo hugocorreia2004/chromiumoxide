@@ -339,15 +339,18 @@ impl Target {
                 .map(|frame| frame.id().clone())
                 .ok_or(CdpError::FrameNotReady)?,
         };
+        // A handle pinned to a session reports any loss of that binding,
+        // including a removed frame, as `FrameNotReady`.
+        if let Some(session_id) = expected_session_id.as_ref() {
+            if !self.frame_ready(&frame_id, session_id) {
+                return Err(CdpError::FrameNotReady);
+            }
+        }
         let slot = self
             .frame_manager
             .isolated_world_slot(&frame_id)
             .ok_or_else(|| CdpError::FrameNotFound(frame_id.clone()))?;
-        let ready = match expected_session_id.as_ref() {
-            Some(session_id) => self.frame_ready(&frame_id, session_id),
-            None => self.frame_session_ready(&slot.session_id),
-        };
-        if ready {
+        if self.frame_session_ready(&slot.session_id) {
             Ok(slot)
         } else {
             Err(CdpError::FrameNotReady)
@@ -4209,6 +4212,10 @@ mod tests {
         assert!(matches!(
             target.isolated_world_slot(Some(FrameId::new("missing")), None),
             Err(CdpError::FrameNotFound(_))
+        ));
+        assert!(matches!(
+            target.isolated_world_slot(Some(FrameId::new("missing")), Some(main_session.clone())),
+            Err(CdpError::FrameNotReady)
         ));
 
         // A cross-document navigation of the frame drops the world.

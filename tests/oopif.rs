@@ -402,6 +402,28 @@ async fn eval_string(frame: &Frame, expression: &str) -> String {
     .expect("timed out waiting for a frame execution context")
 }
 
+/// Like `eval_string`, in the frame's main world: init scripts define their
+/// globals there, which the isolated world used under `stealth` cannot see.
+async fn eval_main_string(frame: &Frame, expression: &str) -> String {
+    tokio::time::timeout(FRAME_TIMEOUT, async {
+        loop {
+            match frame.evaluate_main_world(expression.to_owned()).await {
+                Ok(result) => {
+                    return result
+                        .into_value::<String>()
+                        .expect("evaluation returns a string");
+                }
+                Err(CdpError::FrameNotReady) => {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+                Err(error) => panic!("frame evaluation failed: {error}"),
+            }
+        }
+    })
+    .await
+    .expect("timed out waiting for the frame's main world")
+}
+
 async fn query_element(frame: &Frame, selector: &str) -> Element {
     tokio::time::timeout(FRAME_TIMEOUT, async {
         loop {
@@ -480,7 +502,7 @@ async fn preload_scripts_replay_once_before_and_after_oopif_attach() {
         let child = wait_for_url(&page, "/child").await;
         assert!(child.is_out_of_process());
         assert_eq!(
-            eval_string(&child, "String(globalThis.__earlyPreloadRuns)").await,
+            eval_main_string(&child, "String(globalThis.__earlyPreloadRuns)").await,
             "1"
         );
 
@@ -490,7 +512,7 @@ async fn preload_scripts_replay_once_before_and_after_oopif_attach() {
         .await
         .expect("post-attach script registration reaches the existing child");
         assert_eq!(
-            eval_string(&child, "String(globalThis.__latePreloadRuns)").await,
+            eval_main_string(&child, "String(globalThis.__latePreloadRuns)").await,
             "undefined",
             "the public API preserves Chrome's non-immediate default"
         );
@@ -500,12 +522,12 @@ async fn preload_scripts_replay_once_before_and_after_oopif_attach() {
             .await
             .expect("first child navigation succeeds");
         assert_eq!(
-            eval_string(&child, "String(globalThis.__earlyPreloadRuns)").await,
+            eval_main_string(&child, "String(globalThis.__earlyPreloadRuns)").await,
             "1",
             "the snapshot registration is not duplicated by later fan-out"
         );
         assert_eq!(
-            eval_string(&child, "String(globalThis.__latePreloadRuns)").await,
+            eval_main_string(&child, "String(globalThis.__latePreloadRuns)").await,
             "1",
             "the post-attach registration runs on the next child document"
         );
@@ -515,11 +537,11 @@ async fn preload_scripts_replay_once_before_and_after_oopif_attach() {
             .await
             .expect("second child navigation succeeds");
         assert_eq!(
-            eval_string(&child, "String(globalThis.__earlyPreloadRuns)").await,
+            eval_main_string(&child, "String(globalThis.__earlyPreloadRuns)").await,
             "1"
         );
         assert_eq!(
-            eval_string(&child, "String(globalThis.__latePreloadRuns)").await,
+            eval_main_string(&child, "String(globalThis.__latePreloadRuns)").await,
             "1"
         );
         assert_eq!(server.request_count("127.0.0.1", "/child"), 1);
