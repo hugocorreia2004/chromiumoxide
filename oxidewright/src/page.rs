@@ -120,6 +120,11 @@ struct Effects {
     invalidate: Vec<Frame>,
 }
 
+thread_local! {
+    /// Set while a protocol event is being applied on this thread.
+    static HANDLING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 pub(crate) struct PageInner {
     pub(crate) cdp: chromiumoxide::Page,
     pub(crate) browser: Weak<BrowserInner>,
@@ -302,13 +307,24 @@ impl PageInner {
     /// are delivered after the events preceding them, so calling this from
     /// accessors makes the frame tree consistent with completed commands.
     pub(crate) fn sync(&self) {
-        if let Ok(mut guard) = self.events.try_lock() {
-            if let Some(rx) = guard.as_mut() {
-                while let Ok(event) = rx.try_recv() {
-                    self.handle_event(event);
-                }
+        // Never re-enter from event handling on this thread.
+        if HANDLING.with(|h| h.get()) {
+            return;
+        }
+        // The pump holds this lock only while applying one event (no await),
+        // so blocking here is short.
+        let mut guard = self.events.lock().unwrap();
+        if let Some(rx) = guard.as_mut() {
+            while let Ok(event) = rx.try_recv() {
+                self.handle_event_guarded(event);
             }
         }
+    }
+
+    fn handle_event_guarded(&self, event: Arc<dyn Event>) {
+        HANDLING.with(|h| h.set(true));
+        self.handle_event(event);
+        HANDLING.with(|h| h.set(false));
     }
 
     pub(crate) fn is_closed(&self) -> bool {
@@ -1225,7 +1241,7 @@ async fn pump(page: Arc<PageInner>, mut timers: UnboundedReceiver<(String, u64)>
             match rx.poll_next_unpin(cx) {
                 std::task::Poll::Ready(Some(event)) => {
                     // Handled under the lock so `sync()` keeps the order.
-                    page.handle_event(event);
+                    page.handle_event_guarded(event);
                     std::task::Poll::Ready(Some(()))
                 }
                 std::task::Poll::Ready(None) => std::task::Poll::Ready(None),

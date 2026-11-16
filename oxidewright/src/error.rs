@@ -332,7 +332,7 @@ impl From<serde_json::Error> for Error {
 /// Whether a protocol error means that the session/target is gone.
 pub(crate) fn is_session_closed(err: &CdpError) -> bool {
     match err {
-        CdpError::ChannelSendError(_) | CdpError::NoResponse => true,
+        CdpError::ChannelSendError(_) | CdpError::NoResponse | CdpError::TargetClosed => true,
         CdpError::Chrome(e) => {
             let m = e.message.as_str();
             m.contains("Session with given id not found")
