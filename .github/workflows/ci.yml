@@ -99,3 +99,25 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Check examples
         run: cargo check --examples --features fetcher,zip8,rustls
+
+  oxidewright:
+    name: oxidewright (${{ matrix.os }})
+    needs: [fmt, clippy, msrv]
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    env:
+      RUST_TEST_THREADS: 4
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Rustfmt
+        run: cargo fmt -p oxidewright -- --check
+      - name: Clippy
+        run: cargo clippy -p oxidewright --all-targets -- -D warnings
+      - name: Tests (unit, integration with headless Chrome, doc)
+        run: cargo test -p oxidewright

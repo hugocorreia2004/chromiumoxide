@@ -1,0 +1,1 @@
+window['injected'] = 123;

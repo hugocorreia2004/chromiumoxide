@@ -448,6 +448,29 @@ impl Browser {
         to_command_response::<T>(resp, method)
     }
 
+    /// Call a method on an explicit CDP session (`None` = the browser session).
+    ///
+    /// The command is sent as-is: unlike [`Page::execute`], no page-level
+    /// handling is applied (for example `Page.navigate` is not turned into a
+    /// wait for the `load` lifecycle event). Useful for higher-level crates
+    /// that implement their own navigation and lifecycle tracking.
+    pub async fn execute_with_session<T: Command>(
+        &self,
+        cmd: T,
+        session_id: Option<chromiumoxide_cdp::cdp::browser_protocol::target::SessionId>,
+    ) -> Result<CommandResponse<T::Response>> {
+        let (tx, rx) = oneshot_channel();
+        let method = cmd.identifier();
+        let msg = CommandMessage::with_session(cmd, tx, session_id)?;
+
+        self.sender
+            .clone()
+            .send(HandlerMessage::Command(msg))
+            .await?;
+        let resp = rx.await??;
+        to_command_response::<T>(resp, method)
+    }
+
     /// Return all of the pages of the browser
     pub async fn pages(&self) -> Result<Vec<Page>> {
         let (tx, rx) = oneshot_channel();
