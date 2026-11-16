@@ -173,6 +173,13 @@ impl BrowserInner {
             .map(Page::from_inner)
     }
 
+    /// Read access to the chromiumoxide browser (`None` once closed).
+    pub(crate) async fn cdp_read(
+        &self,
+    ) -> tokio::sync::RwLockReadGuard<'_, Option<chromiumoxide::Browser>> {
+        self.cdp.read().await
+    }
+
     pub(crate) fn forget_page(&self, target_id: &str) {
         self.pages.lock().unwrap().remove(target_id);
     }

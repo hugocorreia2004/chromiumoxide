@@ -53,6 +53,15 @@ fn default_expires() -> f64 {
     -1.0
 }
 
+/// Integral values are written without a fraction, like JavaScript does.
+fn serialize_expires<S: serde::Serializer>(value: &f64, s: S) -> Result<S::Ok, S::Error> {
+    if value.fract() == 0.0 && value.abs() < 9.0e15 {
+        s.serialize_i64(*value as i64)
+    } else {
+        s.serialize_f64(*value)
+    }
+}
+
 /// A cookie as returned by [`BrowserContext::cookies`] (Playwright's
 /// `NetworkCookie`). Serializes like Playwright's storage state entries.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -67,7 +76,7 @@ pub struct Cookie {
     /// Path.
     pub path: String,
     /// Unix time in seconds, `-1` for session cookies.
-    #[serde(default = "default_expires")]
+    #[serde(default = "default_expires", serialize_with = "serialize_expires")]
     pub expires: f64,
     /// `HttpOnly` attribute.
     #[serde(default)]

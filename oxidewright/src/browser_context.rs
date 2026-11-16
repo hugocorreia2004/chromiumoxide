@@ -223,6 +223,9 @@ impl BrowserContext {
             let browser = self.browser_inner()?;
             let mut params = CreateTargetParams::new("about:blank");
             params.browser_context_id = self.inner.id.clone();
+            // Each page gets its own window (like Playwright's pages): a background
+            // tab of a shared window would not render, so screenshots would stall.
+            params.new_window = Some(true);
             let cdp = browser.new_cdp_page(params).await?;
             self.adopt_page(cdp).await
         }
