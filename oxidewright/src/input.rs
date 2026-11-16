@@ -1366,7 +1366,7 @@ impl Keyboard {
         }
     }
 
-    /// Alias of [`Keyboard::r#type`].
+    /// Alias of `Keyboard::type` (`r#type`).
     pub fn type_text(&self, text: impl Into<String>) -> KeyboardType {
         self.r#type(text)
     }
@@ -1401,7 +1401,7 @@ impl IntoFuture for KeyboardPress {
     }
 }
 
-/// Builder returned by [`Keyboard::r#type`]; `.await` it.
+/// Builder returned by [`Keyboard::type_text`] (`r#type`); `.await` it.
 #[must_use = "builders do nothing unless awaited"]
 pub struct KeyboardType {
     input: Arc<InputState>,
@@ -1454,7 +1454,7 @@ impl Mouse {
         }
     }
 
-    /// Alias of [`Mouse::r#move`].
+    /// Alias of `Mouse::move` (`r#move`).
     pub fn move_to(&self, x: impl Into<f64>, y: impl Into<f64>) -> MouseMove {
         self.r#move(x, y)
     }
@@ -1511,7 +1511,7 @@ impl Mouse {
     }
 }
 
-/// Builder returned by [`Mouse::r#move`]; `.await` it.
+/// Builder returned by [`Mouse::move_to`] (`r#move`); `.await` it.
 #[must_use = "builders do nothing unless awaited"]
 pub struct MouseMove {
     input: Arc<InputState>,
