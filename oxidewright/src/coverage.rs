@@ -11,12 +11,16 @@
 use std::collections::{HashMap, HashSet};
 use std::future::{Future, IntoFuture};
 use std::pin::Pin;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use chromiumoxide::cdp::browser_protocol::css::EventStyleSheetAdded;
 use chromiumoxide::cdp::browser_protocol::page::EventFrameNavigated;
 use chromiumoxide::cdp::js_protocol::debugger::{EventPaused, EventScriptParsed};
+use chromiumoxide::cdp::{Event, IntoEventKind};
+use chromiumoxide::listeners::EventListenerRequest;
 use futures::StreamExt;
+use futures::channel::mpsc::UnboundedReceiver;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -87,12 +91,14 @@ pub struct CssCoverageEntry {
 
 #[derive(Default)]
 struct JsData {
+    pending: Arc<AtomicUsize>,
     script_ids: HashSet<String>,
     sources: HashMap<String, String>,
 }
 
 #[derive(Default)]
 struct CssData {
+    pending: Arc<AtomicUsize>,
     urls: HashMap<String, String>,
     sources: HashMap<String, String>,
     order: Vec<String>,
@@ -117,22 +123,45 @@ async fn send(page: &Page, method: &str, params: Value) -> Result<Value> {
         .result)
 }
 
-/// Reset collected data when the main frame navigates (Patchright).
-fn spawn_reset_on_navigation<F>(page: &Page, reset: F) -> Option<tokio::task::JoinHandle<()>>
-where
-    F: Fn() + Send + 'static,
-{
-    let cdp = page.inner.cdp.clone();
-    Some(tokio::spawn(async move {
-        let Ok(mut events) = cdp.event_listener::<EventFrameNavigated>().await else {
-            return;
-        };
-        while let Some(event) = events.next().await {
-            if event.frame.parent_id.is_none() {
-                reset();
-            }
+/// Subscribe to `T` and, when `reset`, main-frame navigations, through one
+/// channel so that both arrive in protocol order.
+async fn ordered_events<T: IntoEventKind>(
+    page: &Page,
+    reset: bool,
+) -> Result<UnboundedReceiver<Arc<dyn Event>>> {
+    let (tx, rx) = futures::channel::mpsc::unbounded();
+    page.inner
+        .cdp
+        .add_event_listener(EventListenerRequest::new::<T>(tx.clone()))
+        .await?;
+    if reset {
+        page.inner
+            .cdp
+            .add_event_listener(EventListenerRequest::new::<EventFrameNavigated>(tx))
+            .await?;
+    }
+    Ok(rx)
+}
+
+/// Whether the event is a navigation of the main frame (Patchright resets
+/// the coverage there instead of on `Runtime.executionContextsCleared`).
+fn is_main_frame_navigation(event: &Arc<dyn Event>) -> bool {
+    event
+        .clone()
+        .into_any_arc()
+        .downcast::<EventFrameNavigated>()
+        .is_ok_and(|e| e.frame.parent_id.is_none())
+}
+
+/// Let the listener task handle the events received so far.
+async fn settle(pending: &AtomicUsize) {
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    for _ in 0..100 {
+        if pending.load(Ordering::SeqCst) == 0 {
+            break;
         }
-    }))
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
 }
 
 impl Page {
@@ -153,6 +182,8 @@ impl Page {
             let Some((data, tasks, report_anonymous)) = state.js.take() else {
                 return Ok(Vec::new());
             };
+            let pending = data.lock().unwrap().pending.clone();
+            settle(&pending).await;
             let profile = send(self, "Profiler.takePreciseCoverage", Value::Null).await;
             let _ = send(self, "Profiler.stopPreciseCoverage", Value::Null).await;
             let _ = send(self, "Profiler.disable", Value::Null).await;
@@ -203,6 +234,8 @@ impl Page {
                 return Ok(Vec::new());
             };
             let usage = send(self, "CSS.stopRuleUsageTracking", Value::Null).await;
+            let pending = data.lock().unwrap().pending.clone();
+            settle(&pending).await;
             let _ = send(self, "CSS.disable", Value::Null).await;
             let _ = send(self, "DOM.disable", Value::Null).await;
             for task in tasks {
@@ -291,33 +324,42 @@ impl IntoFuture for StartJsCoverage {
                 let data = Arc::new(Mutex::new(JsData::default()));
                 let mut tasks = Vec::new();
                 let report_anonymous = self.report_anonymous_scripts;
-                let mut parsed = page.inner.cdp.event_listener::<EventScriptParsed>().await?;
+                let mut events =
+                    ordered_events::<EventScriptParsed>(&page, self.reset_on_navigation).await?;
                 let cdp = page.inner.cdp.clone();
                 let sink = data.clone();
+                let pending = data.lock().unwrap().pending.clone();
                 tasks.push(tokio::spawn(async move {
-                    while let Some(event) = parsed.next().await {
+                    while let Some(event) = events.next().await {
+                        if is_main_frame_navigation(&event) {
+                            let mut d = sink.lock().unwrap();
+                            d.script_ids.clear();
+                            d.sources.clear();
+                            continue;
+                        }
+                        let Ok(event) = event.into_any_arc().downcast::<EventScriptParsed>() else {
+                            continue;
+                        };
                         let id = event.script_id.as_ref().to_string();
                         sink.lock().unwrap().script_ids.insert(id.clone());
                         if event.url.is_empty() && !report_anonymous {
                             continue;
                         }
-                        let cdp = cdp.clone();
-                        let sink = sink.clone();
-                        tokio::spawn(async move {
-                            if let Ok(response) = cdp
-                                .execute(RawCommand::new(
-                                    "Debugger.getScriptSource",
-                                    json!({ "scriptId": id }),
-                                ))
-                                .await
+                        pending.fetch_add(1, Ordering::SeqCst);
+                        if let Ok(response) = cdp
+                            .execute(RawCommand::new(
+                                "Debugger.getScriptSource",
+                                json!({ "scriptId": id }),
+                            ))
+                            .await
+                        {
+                            if let Some(source) =
+                                response.result.get("scriptSource").and_then(Value::as_str)
                             {
-                                if let Some(source) =
-                                    response.result.get("scriptSource").and_then(Value::as_str)
-                                {
-                                    sink.lock().unwrap().sources.insert(id, source.to_string());
-                                }
+                                sink.lock().unwrap().sources.insert(id, source.to_string());
                             }
-                        });
+                        }
+                        pending.fetch_sub(1, Ordering::SeqCst);
                     }
                 }));
                 let mut paused = page.inner.cdp.event_listener::<EventPaused>().await?;
@@ -329,14 +371,6 @@ impl IntoFuture for StartJsCoverage {
                             .await;
                     }
                 }));
-                if self.reset_on_navigation {
-                    let sink = data.clone();
-                    tasks.extend(spawn_reset_on_navigation(&page, move || {
-                        let mut d = sink.lock().unwrap();
-                        d.script_ids.clear();
-                        d.sources.clear();
-                    }));
-                }
                 let result: Result<()> = async {
                     send(&page, "Profiler.enable", Value::Null).await?;
                     send(
@@ -393,21 +427,31 @@ impl IntoFuture for StartCssCoverage {
                 }
                 let data = Arc::new(Mutex::new(CssData::default()));
                 let mut tasks = Vec::new();
-                let mut added = page
-                    .inner
-                    .cdp
-                    .event_listener::<EventStyleSheetAdded>()
-                    .await?;
+                let mut events =
+                    ordered_events::<EventStyleSheetAdded>(&page, self.reset_on_navigation).await?;
                 let cdp = page.inner.cdp.clone();
                 let sink = data.clone();
+                let pending = data.lock().unwrap().pending.clone();
                 tasks.push(tokio::spawn(async move {
-                    while let Some(event) = added.next().await {
+                    while let Some(event) = events.next().await {
+                        if is_main_frame_navigation(&event) {
+                            let mut d = sink.lock().unwrap();
+                            d.urls.clear();
+                            d.sources.clear();
+                            d.order.clear();
+                            continue;
+                        }
+                        let Ok(event) = event.into_any_arc().downcast::<EventStyleSheetAdded>()
+                        else {
+                            continue;
+                        };
                         let header = &event.header;
                         if header.source_url.is_empty() {
                             continue;
                         }
                         let id = header.style_sheet_id.as_ref().to_string();
                         let url = header.source_url.clone();
+                        pending.fetch_add(1, Ordering::SeqCst);
                         if let Ok(response) = cdp
                             .execute(RawCommand::new(
                                 "CSS.getStyleSheetText",
@@ -428,17 +472,9 @@ impl IntoFuture for StartCssCoverage {
                             d.urls.insert(id.clone(), url);
                             d.sources.insert(id, text);
                         }
+                        pending.fetch_sub(1, Ordering::SeqCst);
                     }
                 }));
-                if self.reset_on_navigation {
-                    let sink = data.clone();
-                    tasks.extend(spawn_reset_on_navigation(&page, move || {
-                        let mut d = sink.lock().unwrap();
-                        d.urls.clear();
-                        d.sources.clear();
-                        d.order.clear();
-                    }));
-                }
                 let result: Result<()> = async {
                     send(&page, "DOM.enable", Value::Null).await?;
                     send(&page, "CSS.enable", Value::Null).await?;
