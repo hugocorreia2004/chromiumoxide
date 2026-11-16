@@ -23,6 +23,8 @@ pub(crate) struct ContextExt {
     pub(crate) clock: tokio::sync::Mutex<crate::clock::ClockState>,
     /// Tracing state (`context.tracing()`).
     pub(crate) capture: crate::trace::ContextTracing,
+    /// `context.request()`.
+    pub(crate) request: std::sync::OnceLock<crate::fetch::APIRequestContext>,
 }
 
 impl ContextExt {
@@ -57,6 +59,7 @@ pub(crate) struct PageExt {
     /// is needed by screenshots).
     pub(crate) metrics_override: Mutex<Option<crate::emulation::MetricsOverride>>,
     /// Screenshots of a page are taken one at a time (`Screenshotter._queue`).
+    #[allow(dead_code)] // used by screenshots
     pub(crate) screenshot_queue: tokio::sync::Mutex<()>,
     /// Reason given to `close({ reason })`.
     pub(crate) close_reason: Mutex<Option<String>>,

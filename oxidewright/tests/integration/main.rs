@@ -2,12 +2,15 @@
 //! Test names follow the original test titles.
 
 mod browser;
+mod browsercontext_fetch;
 mod common;
 mod content;
 mod context_network;
 mod cookies;
 mod emulation;
+mod fetch_util;
 mod frames;
+mod global_fetch;
 mod jshandle;
 mod page_clock;
 mod page_evaluate;
