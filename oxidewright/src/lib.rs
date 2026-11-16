@@ -40,13 +40,21 @@
 mod browser;
 mod browser_context;
 mod browser_type;
+mod cdp_raw;
+mod cdp_session;
+mod clock;
 mod console;
 mod context_ext;
+mod context_options;
+mod cookies;
+pub mod coverage;
 mod dialog;
 mod download;
+pub mod emulation;
 mod error;
 mod events;
 pub mod execution_context;
+mod ext;
 mod file_chooser;
 mod frame;
 mod har;
@@ -56,8 +64,12 @@ mod network;
 mod network_manager;
 mod page;
 mod page_ext;
+mod page_extras;
+mod pdf;
 mod progress;
 mod route;
+mod screenshot;
+mod storage_state;
 mod url_match;
 mod websocket;
 mod worker;
@@ -65,9 +77,21 @@ mod worker;
 pub use browser::Browser;
 pub use browser_context::{BrowserContext, NewContext, NewContextOptions};
 pub use browser_type::{BrowserType, ConnectOverCdp, Launch, LaunchOptions, chromium};
+pub use cdp_session::{CDPSession, CdpSessionTarget};
+pub use clock::{Clock, ClockInstall, ClockTicks, ClockTime};
 pub use console::{ConsoleMessage, ConsoleMessageLocation, WebError};
+pub use context_options::{Device, devices};
+pub use cookies::{ClearCookies, Cookie, Cookies, SameSite, SetCookie, TextMatch};
+pub use coverage::{
+    CoverageRange, CssCoverageEntry, FunctionCoverage, JsCoverageEntry, StartCssCoverage,
+    StartJsCoverage, TextRange,
+};
 pub use dialog::Dialog;
 pub use download::Download;
+pub use emulation::{
+    ColorScheme, Contrast, EmulateMedia, ForcedColors, Geolocation, GrantPermissions, Media,
+    ReducedMotion, ServiceWorkerPolicy,
+};
 pub use error::{CONTEXT_DESTROYED_MESSAGE, Error, Result, TARGET_CLOSED_MESSAGE};
 pub use events::{Event, EventKind, ListenerId, WaitForEvent};
 pub use execution_context::{ExecutionContext, World};
@@ -84,10 +108,19 @@ pub use network::{
 };
 pub use network_manager::HttpCredentials;
 pub use page::{AddInitScript, GoHistory, InitScript, Page, Reload, ViewportSize};
+pub use page_extras::{AddTag, CloseContext, ClosePage};
+pub use pdf::{Pdf, PdfLength, PdfMargin};
 pub use progress::DEFAULT_TIMEOUT;
 pub use route::{
     APIResponse, Abort, Continue, Fallback, Fetch, Fulfill, Route, RouteBuilder, RouteHandlerFn,
     RouteId, Unroute, UnrouteAll, UnrouteBehavior,
+};
+pub use screenshot::{
+    Animations, Caret, ElementScreenshot, Mask, PageScreenshot, Rect, ScreenshotScale,
+    ScreenshotType,
+};
+pub use storage_state::{
+    NameValue, OriginState, StorageState, StorageStateBuilder, StorageStateSource,
 };
 pub use url_match::{UrlMatch, glob_to_regex_pattern};
 pub use websocket::{WebSocket, WebSocketEvent, WebSocketPayload};
