@@ -36,12 +36,15 @@ use crate::handler::commandfuture::CommandFuture;
 use crate::handler::domworld::DOMWorldKind;
 use crate::handler::frame::LifecycleEvent;
 use crate::handler::httpfuture::HttpFuture;
-use crate::handler::target::{
-    FrameBoundary, FrameInfo, GetExecutionContext, InternalTargetMessage, TargetMessage,
-};
-use crate::js::EvaluationResult;
+#[cfg(not(feature = "stealth"))]
+use crate::handler::target::GetExecutionContext;
+use crate::handler::target::{FrameBoundary, FrameInfo, InternalTargetMessage, TargetMessage};
+use crate::js::{Evaluation, EvaluationResult};
 use crate::layout::Point;
 use crate::page::ScreenshotParams;
+use crate::worlds;
+#[cfg(feature = "stealth")]
+use crate::worlds::IsolatedWorld;
 use crate::{ArcHttpRequest, keys, utils};
 
 #[derive(Debug)]
@@ -462,6 +465,16 @@ impl PageInner {
         evaluate: impl Into<EvaluateParams>,
     ) -> Result<EvaluationResult> {
         let mut evaluate = evaluate.into();
+        #[cfg(feature = "stealth")]
+        if evaluate.context_id.is_none() && evaluate.unique_context_id.is_none() {
+            return self
+                .in_isolated_world(None, None, |world| {
+                    let mut evaluate = evaluate.clone();
+                    evaluate.context_id = Some(world.context_id);
+                    async move { worlds::evaluate(self, &world.session_id, evaluate).await }
+                })
+                .await;
+        }
         if evaluate.context_id.is_none() {
             evaluate.context_id = self.execution_context().await?;
         }
@@ -485,6 +498,19 @@ impl PageInner {
         evaluate: impl Into<CallFunctionOnParams>,
     ) -> Result<EvaluationResult> {
         let mut evaluate = evaluate.into();
+        #[cfg(feature = "stealth")]
+        if evaluate.execution_context_id.is_none()
+            && evaluate.object_id.is_none()
+            && evaluate.unique_context_id.is_none()
+        {
+            return self
+                .in_isolated_world(None, None, |world| {
+                    let mut evaluate = evaluate.clone();
+                    evaluate.execution_context_id = Some(world.context_id);
+                    async move { worlds::call_function(self, &world.session_id, evaluate).await }
+                })
+                .await;
+        }
         if evaluate.execution_context_id.is_none() {
             evaluate.execution_context_id = self.execution_context().await?;
         }
@@ -528,7 +554,34 @@ impl PageInner {
             .await
     }
 
+    /// The execution context of a world of a frame on the page's own session.
+    ///
+    /// With the `stealth` feature both kinds of world are the frame's
+    /// on-demand isolated world: the main world's contexts are never reported.
     pub async fn execution_context_for_world(
+        &self,
+        frame_id: Option<FrameId>,
+        dom_world: DOMWorldKind,
+    ) -> Result<Option<ExecutionContextId>> {
+        #[cfg(feature = "stealth")]
+        {
+            let _ = dom_world;
+            return match self
+                .isolated_world(frame_id, Some(self.session_id.clone()))
+                .await
+            {
+                Ok(world) => Ok(Some(world.context_id)),
+                Err(CdpError::FrameNotReady | CdpError::FrameNotFound(_)) => Ok(None),
+                Err(error) => Err(error),
+            };
+        }
+        #[cfg(not(feature = "stealth"))]
+        self.legacy_execution_context_for_world(frame_id, dom_world)
+            .await
+    }
+
+    #[cfg(not(feature = "stealth"))]
+    async fn legacy_execution_context_for_world(
         &self,
         frame_id: Option<FrameId>,
         dom_world: DOMWorldKind,
@@ -544,6 +597,126 @@ impl PageInner {
             .await
             .or_target_closed()?;
         Ok(rx.await?)
+    }
+
+    /// The isolated world of a frame's current document (`None`: the main
+    /// frame), created with `Page.createIsolatedWorld` in the frame's own
+    /// session when none is cached. With `expected_session_id` the frame must
+    /// still be bound to that session.
+    #[cfg(feature = "stealth")]
+    pub(crate) async fn isolated_world(
+        &self,
+        frame_id: Option<FrameId>,
+        expected_session_id: Option<SessionId>,
+    ) -> Result<IsolatedWorld> {
+        use chromiumoxide_cdp::cdp::browser_protocol::page::CreateIsolatedWorldParams;
+
+        let (tx, rx) = oneshot_channel();
+        self.internal_sender
+            .clone()
+            .send(InternalTargetMessage::GetIsolatedWorld {
+                frame_id,
+                expected_session_id,
+                tx,
+            })
+            .await
+            .or_target_closed()?;
+        let slot = rx.await??;
+        if let Some(context_id) = slot.context_id {
+            return Ok(IsolatedWorld {
+                frame_id: slot.frame_id,
+                session_id: slot.session_id,
+                context_id,
+            });
+        }
+
+        let create = CreateIsolatedWorldParams::builder()
+            .frame_id(slot.frame_id.clone())
+            .world_name(worlds::random_world_name())
+            .grant_univeral_access(true)
+            .build()
+            .map_err(CdpError::msg)?;
+        let context_id = self
+            .execute_with_session(create, &slot.session_id)
+            .await?
+            .result
+            .execution_context_id;
+        let world = IsolatedWorld {
+            frame_id: slot.frame_id.clone(),
+            session_id: slot.session_id.clone(),
+            context_id,
+        };
+        // A navigation since the slot was handed out makes the target ignore
+        // this world; it still serves this call, whose document is checked by
+        // the browser through the context id.
+        let _ = self
+            .internal_sender
+            .clone()
+            .send(InternalTargetMessage::StoreIsolatedWorld { slot, context_id })
+            .await;
+        Ok(world)
+    }
+
+    /// Drop a cached world the browser reported as gone.
+    #[cfg(feature = "stealth")]
+    pub(crate) async fn forget_isolated_world(&self, world: &IsolatedWorld) {
+        let _ = self
+            .internal_sender
+            .clone()
+            .send(InternalTargetMessage::ForgetIsolatedWorld {
+                frame_id: world.frame_id.clone(),
+                session_id: world.session_id.clone(),
+                context_id: world.context_id,
+            })
+            .await;
+    }
+
+    /// Run `operation` in the isolated world of a frame, retrying in a fresh
+    /// world when the cached one turned out to be gone (the operation never
+    /// ran in that case).
+    #[cfg(feature = "stealth")]
+    pub(crate) async fn in_isolated_world<T, F, Fut>(
+        &self,
+        frame_id: Option<FrameId>,
+        expected_session_id: Option<SessionId>,
+        mut operation: F,
+    ) -> Result<T>
+    where
+        F: FnMut(IsolatedWorld) -> Fut,
+        Fut: std::future::Future<Output = Result<T>>,
+    {
+        let mut attempts = 0;
+        loop {
+            let world = self
+                .isolated_world(frame_id.clone(), expected_session_id.clone())
+                .await?;
+            match operation(world.clone()).await {
+                Err(error) if attempts < 2 && worlds::is_stale_context_error(&error) => {
+                    self.forget_isolated_world(&world).await;
+                    attempts += 1;
+                }
+                result => return result,
+            }
+        }
+    }
+
+    /// Evaluate in the main world of the page's main frame.
+    pub(crate) async fn evaluate_main_world(
+        &self,
+        evaluation: Evaluation,
+    ) -> Result<EvaluationResult> {
+        let frame_id = self.main_frame_id().await?;
+        worlds::evaluate_main_world(self, &frame_id, &self.session_id, true, evaluation).await
+    }
+
+    async fn main_frame_id(&self) -> Result<FrameId> {
+        let (tx, rx) = oneshot_channel();
+        self.sender
+            .clone()
+            .send(TargetMessage::MainFrame(tx))
+            .await
+            .or_target_closed()?;
+        rx.await?.ok_or(CdpError::FrameNotReady)
     }
 
     /// Returns metrics relating to the layout of the page

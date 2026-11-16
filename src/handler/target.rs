@@ -43,8 +43,8 @@ use crate::handler::browser::BrowserContext;
 use crate::handler::domworld::DOMWorldKind;
 use crate::handler::emulation::EmulationManager;
 use crate::handler::frame::{
-    FrameEvent, FrameManager, FrameWaitError, NavigationError, NavigationId, NavigationOk,
-    PreloadId,
+    FrameEvent, FrameManager, FrameWaitError, IsolatedWorldSlot, NavigationError, NavigationId,
+    NavigationOk, PreloadId,
 };
 use crate::handler::frame::{FrameNavigationRequest, UTILITY_WORLD_NAME};
 use crate::handler::network::{NetworkCommand, NetworkEvent, NetworkManager, PauseDisposition};
@@ -325,6 +325,38 @@ impl Target {
                 .is_some_and(|frame| frame.session_id() == Some(session_id))
     }
 
+    /// Resolve the isolated-world slot of a frame for a page-side caller.
+    fn isolated_world_slot(
+        &self,
+        frame_id: Option<FrameId>,
+        expected_session_id: Option<SessionId>,
+    ) -> Result<IsolatedWorldSlot> {
+        let frame_id = match frame_id {
+            Some(frame_id) => frame_id,
+            None => self
+                .frame_manager
+                .main_frame()
+                .map(|frame| frame.id().clone())
+                .ok_or(CdpError::FrameNotReady)?,
+        };
+        // A handle pinned to a session reports any loss of that binding,
+        // including a removed frame, as `FrameNotReady`.
+        if let Some(session_id) = expected_session_id.as_ref() {
+            if !self.frame_ready(&frame_id, session_id) {
+                return Err(CdpError::FrameNotReady);
+            }
+        }
+        let slot = self
+            .frame_manager
+            .isolated_world_slot(&frame_id)
+            .ok_or_else(|| CdpError::FrameNotFound(frame_id.clone()))?;
+        if self.frame_session_ready(&slot.session_id) {
+            Ok(slot)
+        } else {
+            Err(CdpError::FrameNotReady)
+        }
+    }
+
     fn build_frame_info(&self, frame: &crate::handler::frame::Frame) -> Result<FrameInfo> {
         Ok(FrameInfo {
             frame_id: frame.id().clone(),
@@ -550,6 +582,11 @@ impl Target {
     ) -> CommandChain {
         match phase {
             InitPhase::Frame => FrameManager::init_commands(self.config.request_timeout),
+            // With `stealth` no utility world is registered for a child target.
+            InitPhase::IsolatedWorld if cfg!(feature = "stealth") => CommandChain::new(
+                Vec::<(MethodId, serde_json::Value)>::new(),
+                self.config.request_timeout,
+            ),
             InitPhase::IsolatedWorld => self
                 .frame_manager
                 .ensure_isolated_world_on_next_document_in_session(
@@ -1088,6 +1125,11 @@ impl Target {
             InternalTargetMessage::WaitForClose { tx } => {
                 let _ = tx.send(());
             }
+            InternalTargetMessage::GetIsolatedWorld { tx, .. } => {
+                let _ = tx.send(Err(CdpError::TargetClosed));
+            }
+            InternalTargetMessage::StoreIsolatedWorld { .. }
+            | InternalTargetMessage::ForgetIsolatedWorld { .. } => {}
             InternalTargetMessage::GetPinnedExecutionContext { tx, .. } => {
                 let _ = tx.send(Err(CdpError::TargetClosed));
             }
@@ -1550,9 +1592,14 @@ impl Target {
                                 );
                             } else {
                                 self.main_isolated_world_attempted = true;
-                                if let Some(isolated_world_cmds) =
+                                // With `stealth` no utility world is created at
+                                // attach: worlds are created on demand.
+                                let utility_world = if cfg!(feature = "stealth") {
+                                    None
+                                } else {
                                     self.frame_manager.ensure_isolated_world(UTILITY_WORLD_NAME)
-                                {
+                                };
+                                if let Some(isolated_world_cmds) = utility_world {
                                     *cmds = isolated_world_cmds;
                                 } else {
                                     self.init_state = TargetInit::InitializingNetwork(
@@ -1848,6 +1895,32 @@ impl Target {
                     InternalTargetMessage::WaitForClose { tx } => {
                         self.close_waiters.push(tx);
                     }
+                    InternalTargetMessage::GetIsolatedWorld {
+                        frame_id,
+                        expected_session_id,
+                        tx,
+                    } => {
+                        let _ = tx.send(self.isolated_world_slot(frame_id, expected_session_id));
+                    }
+                    InternalTargetMessage::StoreIsolatedWorld { slot, context_id } => {
+                        self.frame_manager.store_isolated_world(
+                            &slot.frame_id,
+                            &slot.session_id,
+                            slot.generation,
+                            context_id,
+                        );
+                    }
+                    InternalTargetMessage::ForgetIsolatedWorld {
+                        frame_id,
+                        session_id,
+                        context_id,
+                    } => {
+                        self.frame_manager.forget_isolated_world(
+                            &frame_id,
+                            &session_id,
+                            context_id,
+                        );
+                    }
                     InternalTargetMessage::WaitForNavigationResult { tx } => {
                         if let Some(frame) = self.frame_manager.main_frame() {
                             if frame.is_loaded() {
@@ -1999,6 +2072,8 @@ impl Target {
         self.initiator_deadline = Some(Instant::now() + self.config.request_timeout);
     }
 
+    /// With the `stealth` feature only auto-attach is sent: `Log.enable` and
+    /// `Performance.enable` are left to the caller.
     pub(crate) fn page_init_commands(timeout: Duration) -> CommandChain {
         let attach = SetAutoAttachParams::builder()
             .flatten(true)
@@ -2006,22 +2081,20 @@ impl Target {
             .wait_for_debugger_on_start(true)
             .build()
             .unwrap();
-        let enable_performance = performance::EnableParams::default();
-        let enable_log = cdplog::EnableParams::default();
-        CommandChain::new(
-            vec![
-                (attach.identifier(), serde_json::to_value(attach).unwrap()),
-                (
-                    enable_performance.identifier(),
-                    serde_json::to_value(enable_performance).unwrap(),
-                ),
-                (
-                    enable_log.identifier(),
-                    serde_json::to_value(enable_log).unwrap(),
-                ),
-            ],
-            timeout,
-        )
+        let mut commands = vec![(attach.identifier(), serde_json::to_value(attach).unwrap())];
+        if !cfg!(feature = "stealth") {
+            let enable_performance = performance::EnableParams::default();
+            let enable_log = cdplog::EnableParams::default();
+            commands.push((
+                enable_performance.identifier(),
+                serde_json::to_value(enable_performance).unwrap(),
+            ));
+            commands.push((
+                enable_log.identifier(),
+                serde_json::to_value(enable_log).unwrap(),
+            ));
+        }
+        CommandChain::new(commands, timeout)
     }
 }
 
@@ -2236,6 +2309,24 @@ pub(crate) enum InternalTargetMessage {
     /// Resolve once this target is torn down.
     WaitForClose {
         tx: Sender<()>,
+    },
+    /// The isolated world cached for a frame (`None`: the main frame). With
+    /// `expected_session_id` the frame must still be bound to that session.
+    GetIsolatedWorld {
+        frame_id: Option<FrameId>,
+        expected_session_id: Option<SessionId>,
+        tx: Sender<Result<IsolatedWorldSlot>>,
+    },
+    /// Cache a world created for a frame's document.
+    StoreIsolatedWorld {
+        slot: IsolatedWorldSlot,
+        context_id: ExecutionContextId,
+    },
+    /// Drop a cached world the browser reported as gone.
+    ForgetIsolatedWorld {
+        frame_id: FrameId,
+        session_id: SessionId,
+        context_id: ExecutionContextId,
     },
     GetPinnedExecutionContext {
         dom_world: DOMWorldKind,
@@ -2689,6 +2780,7 @@ mod tests {
         request
     }
 
+    #[cfg(not(feature = "stealth"))]
     fn advance_child_to_isolated_world(
         target: &mut Target,
         child_session: &SessionId,
@@ -2783,6 +2875,7 @@ mod tests {
         }
     }
 
+    #[cfg(not(feature = "stealth"))]
     fn isolated_execution_context(
         frame_id: &str,
         context_id: i64,
@@ -3897,6 +3990,8 @@ mod tests {
         )));
     }
 
+    // Exercises the utility world and `Runtime.enable`, which `stealth` omits.
+    #[cfg(not(feature = "stealth"))]
     #[test]
     fn iframe_init_optional_error_skips_to_recursive_auto_attach() {
         let (mut target, _) = initialized_target();
@@ -3941,6 +4036,8 @@ mod tests {
         );
     }
 
+    // Exercises the utility world and `Runtime.enable`, which `stealth` omits.
+    #[cfg(not(feature = "stealth"))]
     #[test]
     fn iframe_init_isolated_world_success_confirms_registration() {
         let (mut target, _) = initialized_target();
@@ -3977,6 +4074,170 @@ mod tests {
         assert_eq!(auto_attach.method.as_ref(), "Target.setAutoAttach");
     }
 
+    /// Methods sent while a fresh target and one of its child sessions
+    /// initialize, every command answered successfully.
+    fn initialization_methods() -> Vec<String> {
+        let mut target = test_target();
+        let main_session = session("main");
+        target.set_session_id(main_session.clone());
+        let now = Instant::now();
+        let mut methods = Vec::new();
+        // AttachToTarget, then the main-session chains.
+        for _ in 0..64 {
+            match poll_target(&mut target, now) {
+                Some(TargetEvent::Request(request)) => {
+                    methods.push(request.method.as_ref().to_owned());
+                    let result = if request.method.as_ref() == GetFrameTreeParams::IDENTIFIER {
+                        frame_tree_result("main-frame")
+                    } else {
+                        json!({})
+                    };
+                    target.on_response_in_session(
+                        ok_response(result),
+                        request.method.as_ref(),
+                        Some(main_session.clone()),
+                    );
+                }
+                Some(_) => {}
+                None => break,
+            }
+        }
+        assert!(target.is_initialized(), "main initialization completes");
+
+        let child_session = session("child");
+        target.on_event(attach_event_message(
+            &main_session,
+            attached_event("child-frame", &child_session),
+        ));
+        for _ in 0..64 {
+            match poll_target(&mut target, now) {
+                Some(TargetEvent::Request(request)) => {
+                    methods.push(request.method.as_ref().to_owned());
+                    let result = if request.method.as_ref() == GetFrameTreeParams::IDENTIFIER {
+                        frame_tree_result("child-frame")
+                    } else {
+                        json!({})
+                    };
+                    let session_id = request.session_id.clone().map(SessionId::new);
+                    target.on_response_in_session(
+                        ok_response(result),
+                        request.method.as_ref(),
+                        session_id,
+                    );
+                }
+                Some(_) => {}
+                None => break,
+            }
+        }
+        methods
+    }
+
+    #[cfg(feature = "stealth")]
+    #[test]
+    fn stealth_initialization_sends_no_detectable_commands() {
+        let methods = initialization_methods();
+        for forbidden in [
+            "Runtime.enable",
+            "Log.enable",
+            "Performance.enable",
+            "Page.addScriptToEvaluateOnNewDocument",
+            "Page.createIsolatedWorld",
+            "Runtime.addBinding",
+        ] {
+            assert!(
+                !methods.iter().any(|method| method == forbidden),
+                "{forbidden} sent during initialization: {methods:?}"
+            );
+        }
+        // Paused child targets are still resumed.
+        assert!(
+            methods
+                .iter()
+                .any(|method| method == "Runtime.runIfWaitingForDebugger")
+        );
+        assert!(
+            methods
+                .iter()
+                .any(|method| method == "Page.setLifecycleEventsEnabled")
+        );
+    }
+
+    #[cfg(not(feature = "stealth"))]
+    #[test]
+    fn default_initialization_enables_runtime_and_the_utility_world() {
+        let methods = initialization_methods();
+        for expected in [
+            "Runtime.enable",
+            "Log.enable",
+            "Performance.enable",
+            "Page.addScriptToEvaluateOnNewDocument",
+        ] {
+            assert!(
+                methods.iter().any(|method| method == expected),
+                "{expected} missing from {methods:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn isolated_world_slot_follows_frame_session_and_navigation() {
+        let (mut target, main_session) = initialized_target();
+        let main_frame = FrameId::new("main-frame");
+
+        let slot = target
+            .isolated_world_slot(None, None)
+            .expect("main frame slot");
+        assert_eq!(slot.frame_id, main_frame);
+        assert_eq!(slot.session_id, main_session);
+        assert_eq!(slot.context_id, None);
+
+        assert!(target.frame_manager.store_isolated_world(
+            &main_frame,
+            &main_session,
+            slot.generation,
+            ExecutionContextId::new(7),
+        ));
+        assert_eq!(
+            target
+                .isolated_world_slot(Some(main_frame.clone()), Some(main_session.clone()))
+                .expect("pinned slot")
+                .context_id,
+            Some(ExecutionContextId::new(7))
+        );
+        // A caller pinned to another session is refused.
+        assert!(matches!(
+            target.isolated_world_slot(Some(main_frame.clone()), Some(session("other"))),
+            Err(CdpError::FrameNotReady)
+        ));
+        assert!(matches!(
+            target.isolated_world_slot(Some(FrameId::new("missing")), None),
+            Err(CdpError::FrameNotFound(_))
+        ));
+        assert!(matches!(
+            target.isolated_world_slot(Some(FrameId::new("missing")), Some(main_session.clone())),
+            Err(CdpError::FrameNotReady)
+        ));
+
+        // A cross-document navigation of the frame drops the world.
+        target.on_event(CdpEventMessage {
+            method: "Page.frameNavigated".into(),
+            session_id: Some(main_session.as_ref().to_owned()),
+            params: CdpEvent::PageFrameNavigated(Box::new(
+                chromiumoxide_cdp::cdp::browser_protocol::page::EventFrameNavigated {
+                    frame: cdp_frame("main-frame", None),
+                    r#type:
+                        chromiumoxide_cdp::cdp::browser_protocol::page::NavigationType::Navigation,
+                },
+            )),
+        });
+        let after = target
+            .isolated_world_slot(None, None)
+            .expect("main frame slot");
+        assert_eq!(after.context_id, None);
+        assert_ne!(after.generation, slot.generation);
+    }
+
+    #[cfg(not(feature = "stealth"))]
     #[test]
     fn main_isolated_world_protocol_error_attempts_add_script_once_then_enters_network_init() {
         let (mut target, main_session) = initialized_target();
@@ -4048,6 +4309,8 @@ mod tests {
         ));
     }
 
+    // Exercises the utility world and `Runtime.enable`, which `stealth` omits.
+    #[cfg(not(feature = "stealth"))]
     #[test]
     fn iframe_init_isolated_world_timeout_stays_pending_and_unpauses() {
         let timeout = Duration::from_millis(1);
@@ -4330,6 +4593,8 @@ mod tests {
         );
     }
 
+    // Exercises the utility world and `Runtime.enable`, which `stealth` omits.
+    #[cfg(not(feature = "stealth"))]
     #[test]
     fn iframe_init_post_chain_replays_latest_state_before_unpause_and_becomes_ready() {
         let (mut target, _) = initialized_target();

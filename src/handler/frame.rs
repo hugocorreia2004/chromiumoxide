@@ -56,6 +56,13 @@ pub struct Frame {
     security_origin: String,
     /// The received lifecycle events
     lifecycle_events: HashSet<MethodId>,
+    /// Isolated world created on demand for this frame's current document
+    /// (used by the `stealth` feature instead of contexts reported by
+    /// `Runtime.enable`).
+    isolated_world: Option<ExecutionContextId>,
+    /// Bumped whenever the cached isolated world becomes invalid, so a world
+    /// created for an older document is never stored for a newer one.
+    world_generation: u64,
 }
 
 impl Frame {
@@ -73,6 +80,8 @@ impl Frame {
             session_id: None,
             security_origin: String::new(),
             lifecycle_events: Default::default(),
+            isolated_world: None,
+            world_generation: 0,
         }
     }
 
@@ -91,6 +100,8 @@ impl Frame {
             session_id: None,
             security_origin: String::new(),
             lifecycle_events: Default::default(),
+            isolated_world: None,
+            world_generation: 0,
         }
     }
 
@@ -162,6 +173,15 @@ impl Frame {
         };
         self.url = Some(url);
         self.security_origin.clone_from(&frame.security_origin);
+        // A new document: its worlds are new too. A cached id would point at
+        // a destroyed context, or after a process swap at an unrelated one.
+        self.reset_isolated_world();
+    }
+
+    /// Forget the cached isolated world of this frame.
+    fn reset_isolated_world(&mut self) {
+        self.isolated_world = None;
+        self.world_generation = self.world_generation.wrapping_add(1);
     }
 
     fn navigated_within_url(&mut self, url: String) {
@@ -185,6 +205,7 @@ impl Frame {
     pub fn clear_contexts(&mut self) {
         self.main_world.take_context();
         self.secondary_world.take_context();
+        self.reset_isolated_world();
     }
 
     pub fn destroy_context(&mut self, ctx_unique_id: &str) {
@@ -219,6 +240,8 @@ impl From<CdpFrame> for Frame {
             session_id: None,
             security_origin: frame.security_origin,
             lifecycle_events: Default::default(),
+            isolated_world: None,
+            world_generation: 0,
         }
     }
 }
@@ -274,6 +297,16 @@ struct ContextBinding {
 struct UniqueContext {
     frame_id: FrameId,
     key: Option<ContextKey>,
+}
+
+/// A frame's cached isolated world, as handed to a page-side caller.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(not(feature = "stealth"), allow(dead_code))]
+pub(crate) struct IsolatedWorldSlot {
+    pub(crate) frame_id: FrameId,
+    pub(crate) session_id: SessionId,
+    pub(crate) generation: u64,
+    pub(crate) context_id: Option<ExecutionContextId>,
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -341,29 +374,33 @@ impl FrameManager {
     }
 
     /// The commands to execute in order to initialize this frame manager
+    ///
+    /// With the `stealth` feature `Runtime.enable` is not sent: it makes the
+    /// browser report console calls and execution contexts, which page
+    /// scripts can detect.
     pub fn init_commands(timeout: Duration) -> CommandChain {
         let enable = page::EnableParams::default();
         let get_tree = page::GetFrameTreeParams::default();
         let set_lifecycle = page::SetLifecycleEventsEnabledParams::new(true);
-        let enable_runtime = runtime::EnableParams::default();
-        CommandChain::new(
-            vec![
-                (enable.identifier(), serde_json::to_value(enable).unwrap()),
-                (
-                    get_tree.identifier(),
-                    serde_json::to_value(get_tree).unwrap(),
-                ),
-                (
-                    set_lifecycle.identifier(),
-                    serde_json::to_value(set_lifecycle).unwrap(),
-                ),
-                (
-                    enable_runtime.identifier(),
-                    serde_json::to_value(enable_runtime).unwrap(),
-                ),
-            ],
-            timeout,
-        )
+        let mut commands = vec![
+            (enable.identifier(), serde_json::to_value(enable).unwrap()),
+            (
+                get_tree.identifier(),
+                serde_json::to_value(get_tree).unwrap(),
+            ),
+            (
+                set_lifecycle.identifier(),
+                serde_json::to_value(set_lifecycle).unwrap(),
+            ),
+        ];
+        if !cfg!(feature = "stealth") {
+            let enable_runtime = runtime::EnableParams::default();
+            commands.push((
+                enable_runtime.identifier(),
+                serde_json::to_value(enable_runtime).unwrap(),
+            ));
+        }
+        CommandChain::new(commands, timeout)
     }
 
     pub fn main_frame(&self) -> Option<&Frame> {
@@ -1804,6 +1841,63 @@ impl FrameManager {
         Some(CommandChain::new(cmds, self.request_timeout))
     }
 
+    /// The isolated world cached for a frame's current document, with the
+    /// generation a newly created world must be stored under.
+    #[cfg_attr(not(feature = "stealth"), allow(dead_code))]
+    pub(crate) fn isolated_world_slot(&self, frame_id: &FrameId) -> Option<IsolatedWorldSlot> {
+        let frame = self.frames.get(frame_id)?;
+        Some(IsolatedWorldSlot {
+            frame_id: frame_id.clone(),
+            session_id: frame.session_id().cloned()?,
+            generation: frame.world_generation,
+            context_id: frame.isolated_world,
+        })
+    }
+
+    /// Cache a world created for `frame_id` in `session_id`. Ignored when the
+    /// frame navigated, changed session or went away since `generation` was
+    /// handed out.
+    #[cfg_attr(not(feature = "stealth"), allow(dead_code))]
+    pub(crate) fn store_isolated_world(
+        &mut self,
+        frame_id: &FrameId,
+        session_id: &SessionId,
+        generation: u64,
+        context_id: ExecutionContextId,
+    ) -> bool {
+        match self.frames.get_mut(frame_id) {
+            Some(frame)
+                if frame.session_id() == Some(session_id)
+                    && frame.world_generation == generation =>
+            {
+                frame.isolated_world = Some(context_id);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Drop a cached world the browser no longer knows. Only the given id is
+    /// dropped, so a newer world stored meanwhile survives.
+    #[cfg_attr(not(feature = "stealth"), allow(dead_code))]
+    pub(crate) fn forget_isolated_world(
+        &mut self,
+        frame_id: &FrameId,
+        session_id: &SessionId,
+        context_id: ExecutionContextId,
+    ) -> bool {
+        match self.frames.get_mut(frame_id) {
+            Some(frame)
+                if frame.session_id() == Some(session_id)
+                    && frame.isolated_world == Some(context_id) =>
+            {
+                frame.reset_isolated_world();
+                true
+            }
+            _ => false,
+        }
+    }
+
     pub(crate) fn settle_isolated_world_registration(
         &mut self,
         session_id: &SessionId,
@@ -2450,6 +2544,127 @@ mod tests {
                 NavigationOk::NewDocumentNavigation(NavigationId(34))
             )))
         ));
+    }
+
+    /// The isolated world cache never hands out a world for another document
+    /// or session: navigation, detach and session changes drop it, and a
+    /// world created before such a change is not stored.
+    #[test]
+    fn isolated_world_cache_is_invalidated_by_navigation_detach_and_swap() {
+        let (mut manager, main_session, main_frame_id) = manager_with_main();
+
+        let slot = manager
+            .isolated_world_slot(&main_frame_id)
+            .expect("main frame slot");
+        assert_eq!(slot.context_id, None);
+        assert!(manager.store_isolated_world(
+            &main_frame_id,
+            &main_session,
+            slot.generation,
+            ExecutionContextId::new(3),
+        ));
+        assert_eq!(
+            manager
+                .isolated_world_slot(&main_frame_id)
+                .expect("slot")
+                .context_id,
+            Some(ExecutionContextId::new(3))
+        );
+
+        // A same-document navigation keeps the world.
+        manager.on_frame_navigated_within_document_in_session(
+            &EventNavigatedWithinDocument {
+                frame_id: main_frame_id.clone(),
+                url: "https://main-frame.example/#a".to_owned(),
+                navigation_type: NavigatedWithinDocumentNavigationType::Fragment,
+            },
+            main_session.clone(),
+        );
+        assert!(
+            manager
+                .isolated_world_slot(&main_frame_id)
+                .expect("slot")
+                .context_id
+                .is_some()
+        );
+
+        // A new document (possibly in another process, where context ids
+        // restart) drops it; a world created for the old document is ignored.
+        let stale_generation = slot.generation;
+        manager.on_frame_navigated_in_session(
+            &cdp_frame("main-frame", None, "next-loader"),
+            main_session.clone(),
+        );
+        let fresh = manager.isolated_world_slot(&main_frame_id).expect("slot");
+        assert_eq!(fresh.context_id, None);
+        assert!(!manager.store_isolated_world(
+            &main_frame_id,
+            &main_session,
+            stale_generation,
+            ExecutionContextId::new(3),
+        ));
+        assert!(manager.store_isolated_world(
+            &main_frame_id,
+            &main_session,
+            fresh.generation,
+            ExecutionContextId::new(9),
+        ));
+
+        // Forgetting only drops the reported world.
+        assert!(!manager.forget_isolated_world(
+            &main_frame_id,
+            &main_session,
+            ExecutionContextId::new(3)
+        ));
+        assert!(manager.forget_isolated_world(
+            &main_frame_id,
+            &main_session,
+            ExecutionContextId::new(9)
+        ));
+        assert_eq!(
+            manager
+                .isolated_world_slot(&main_frame_id)
+                .expect("slot")
+                .context_id,
+            None
+        );
+
+        // A subframe moving to its own (out-of-process) session drops its
+        // world, and a store for the old session is refused.
+        let child_session = session("child");
+        add_child(&mut manager, "child-frame", "main-frame", &main_session);
+        let child_frame_id = FrameId::new("child-frame");
+        let child = manager
+            .isolated_world_slot(&child_frame_id)
+            .expect("child slot");
+        assert!(manager.store_isolated_world(
+            &child_frame_id,
+            &main_session,
+            child.generation,
+            ExecutionContextId::new(4),
+        ));
+        manager.on_attached_to_target_in_session(
+            &attached_event("child-frame", "main-frame", &child_session),
+            child_session.clone(),
+        );
+        let swapped = manager
+            .isolated_world_slot(&child_frame_id)
+            .expect("child slot");
+        assert_eq!(swapped.session_id, child_session);
+        assert_eq!(swapped.context_id, None);
+        assert!(!manager.store_isolated_world(
+            &child_frame_id,
+            &main_session,
+            swapped.generation,
+            ExecutionContextId::new(5),
+        ));
+
+        // A detached frame has no slot at all.
+        manager.on_frame_detached(&EventFrameDetached {
+            frame_id: child_frame_id.clone(),
+            reason: FrameDetachedReason::Remove,
+        });
+        assert!(manager.isolated_world_slot(&child_frame_id).is_none());
     }
 
     #[test]

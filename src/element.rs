@@ -74,6 +74,21 @@ impl Element {
             .node
             .backend_node_id;
 
+        // With `stealth` the node is resolved into the frame's isolated world,
+        // so every later call on this element runs there.
+        #[cfg(feature = "stealth")]
+        let resp = tab
+            .in_isolated_world(Some(frame_id.clone()), Some(session_id.clone()), |world| {
+                let params = ResolveNodeParams::builder()
+                    .backend_node_id(backend_node_id)
+                    .execution_context_id(world.context_id)
+                    .build();
+                let tab = &tab;
+                let session_id = &session_id;
+                async move { tab.execute_with_session(params, session_id).await }
+            })
+            .await?;
+        #[cfg(not(feature = "stealth"))]
         let resp = tab
             .execute_with_session(
                 ResolveNodeParams::builder()

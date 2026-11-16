@@ -58,6 +58,10 @@ tokio = { version = "1", features = ["rt-multi-thread", "time", "macros"] }
 default = ["bytes"]
 fetcher = ["chromiumoxide_fetcher"]
 bytes = ["dep:bytes"]
+# Leave no CDP traces that page scripts can detect: no `Runtime.enable`,
+# `Log.enable` or `Performance.enable`, no utility world at attach, and
+# evaluation in isolated worlds created on demand. See the README.
+stealth = []
 
 rustls = ["chromiumoxide_fetcher/rustls"]
 native-tls = ["chromiumoxide_fetcher/native-tls"]
