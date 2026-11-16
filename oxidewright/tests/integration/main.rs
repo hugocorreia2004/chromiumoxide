@@ -23,3 +23,5 @@ mod page_wait_for;
 mod screenshot;
 mod smoke;
 mod storage_state;
+mod tracing;
+mod video;

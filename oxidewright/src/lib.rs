@@ -69,9 +69,12 @@ mod page_extras;
 mod pdf;
 mod progress;
 mod route;
+mod screencast;
 mod screenshot;
 mod storage_state;
+pub mod trace;
 mod url_match;
+pub mod video;
 mod websocket;
 mod worker;
 
@@ -127,7 +130,9 @@ pub use screenshot::{
 pub use storage_state::{
     NameValue, OriginState, StorageState, StorageStateBuilder, StorageStateSource,
 };
+pub use trace::{Tracing, TracingStart, TracingStop};
 pub use url_match::{UrlMatch, glob_to_regex_pattern};
+pub use video::Video;
 pub use websocket::{WebSocket, WebSocketEvent, WebSocketPayload};
 pub use worker::{Worker, WorkerEvaluate};
 
