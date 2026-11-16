@@ -163,6 +163,16 @@ impl BrowserInner {
         );
     }
 
+    /// The page of a target, if it is known.
+    pub(crate) fn page_by_target_id(&self, target_id: &str) -> Option<Page> {
+        self.pages
+            .lock()
+            .unwrap()
+            .get(target_id)
+            .and_then(Weak::upgrade)
+            .map(Page::from_inner)
+    }
+
     pub(crate) fn forget_page(&self, target_id: &str) {
         self.pages.lock().unwrap().remove(target_id);
     }
@@ -194,10 +204,7 @@ impl BrowserInner {
         let context = BrowserContext::new(
             None,
             self.self_weak.clone(),
-            NewContextOptions {
-                viewport: None,
-                base_url: None,
-            },
+            NewContextOptions::no_overrides(),
         );
         *self.default_context.lock().unwrap() = Some(context.clone());
         let default_id = self

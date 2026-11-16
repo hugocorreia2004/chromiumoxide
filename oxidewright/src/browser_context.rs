@@ -19,13 +19,56 @@ use crate::progress::TimeoutSettings;
 
 type BoxFuture<T> = Pin<Box<dyn Future<Output = T> + Send>>;
 
-/// Options of [`crate::Browser::new_context`].
+/// Options of [`crate::Browser::new_context`] (Playwright's
+/// `BrowserContextOptions`). Options left unset are not emulated, see
+/// [`crate::emulation`] about stealth. Builder methods live on
+/// [`NewContext`].
 #[derive(Debug, Clone)]
 pub struct NewContextOptions {
     /// Viewport of every page (default 1280x720); `None` keeps the window size.
     pub viewport: Option<ViewportSize>,
     /// Base URL used to resolve relative URLs of `goto`, `wait_for_url`, ...
     pub base_url: Option<String>,
+    /// Screen size exposed to pages (`window.screen`); defaults to the viewport.
+    pub screen: Option<ViewportSize>,
+    /// Device scale factor (`window.devicePixelRatio`), default 1.
+    pub device_scale_factor: Option<f64>,
+    /// Emulate a mobile device (meta viewport, overlay scrollbars...).
+    pub is_mobile: Option<bool>,
+    /// Emulate touch support.
+    pub has_touch: Option<bool>,
+    /// User agent override.
+    pub user_agent: Option<String>,
+    /// Locale (`navigator.language`, `Accept-Language`, `Intl`), e.g. `de-DE`.
+    pub locale: Option<String>,
+    /// Timezone, e.g. `Europe/Lisbon`.
+    pub timezone_id: Option<String>,
+    /// Emulated geolocation.
+    pub geolocation: Option<crate::emulation::Geolocation>,
+    /// Permissions granted to every origin.
+    pub permissions: Option<Vec<String>>,
+    /// `prefers-color-scheme`.
+    pub color_scheme: Option<crate::emulation::ColorScheme>,
+    /// `prefers-reduced-motion`.
+    pub reduced_motion: Option<crate::emulation::ReducedMotion>,
+    /// `forced-colors`.
+    pub forced_colors: Option<crate::emulation::ForcedColors>,
+    /// `prefers-contrast`.
+    pub contrast: Option<crate::emulation::Contrast>,
+    /// `Some(false)` disables JavaScript.
+    pub java_script_enabled: Option<bool>,
+    /// Bypass the page's Content-Security-Policy.
+    pub bypass_csp: bool,
+    /// Ignore HTTPS errors (pages and `context.request()`).
+    pub ignore_https_errors: bool,
+    /// Accept downloads (default `true`); `None` keeps the browser's behavior.
+    pub accept_downloads: Option<bool>,
+    /// Make locators strict by default.
+    pub strict_selectors: bool,
+    /// Whether pages may register service workers.
+    pub service_workers: crate::emulation::ServiceWorkerPolicy,
+    /// Initial cookies and storage.
+    pub storage_state: Option<crate::storage_state::StorageStateSource>,
 }
 
 impl Default for NewContextOptions {
@@ -35,7 +78,39 @@ impl Default for NewContextOptions {
                 width: 1280,
                 height: 720,
             }),
+            accept_downloads: Some(true),
+            ..Self::no_overrides()
+        }
+    }
+}
+
+impl NewContextOptions {
+    /// Options that emulate nothing, used for the default context of a
+    /// browser attached with `connect_over_cdp`.
+    pub fn no_overrides() -> Self {
+        Self {
+            viewport: None,
             base_url: None,
+            screen: None,
+            device_scale_factor: None,
+            is_mobile: None,
+            has_touch: None,
+            user_agent: None,
+            locale: None,
+            timezone_id: None,
+            geolocation: None,
+            permissions: None,
+            color_scheme: None,
+            reduced_motion: None,
+            forced_colors: None,
+            contrast: None,
+            java_script_enabled: None,
+            bypass_csp: false,
+            ignore_https_errors: false,
+            accept_downloads: None,
+            strict_selectors: false,
+            service_workers: Default::default(),
+            storage_state: None,
         }
     }
 }
@@ -54,6 +129,7 @@ pub(crate) struct ContextInner {
     pages: Mutex<Vec<Page>>,
     init_scripts: Mutex<Vec<String>>,
     closed: AtomicBool,
+    pub(crate) ext: crate::ext::ContextExt,
 }
 
 impl fmt::Debug for BrowserContext {
@@ -94,6 +170,7 @@ impl BrowserContext {
                 pages: Mutex::new(Vec::new()),
                 init_scripts: Mutex::new(Vec::new()),
                 closed: AtomicBool::new(false),
+                ext: Default::default(),
             }),
         }
     }
@@ -127,9 +204,7 @@ impl BrowserContext {
         let browser = self.browser_inner()?;
         let inner = PageInner::attach(cdp, Arc::downgrade(&browser), self).await?;
         let page = Page::from_inner(inner);
-        if let Some(viewport) = self.inner.options.viewport {
-            page.inner.apply_viewport(viewport).await?;
-        }
+        crate::emulation::init_page(&page).await?;
         let scripts = self.inner.init_scripts.lock().unwrap().clone();
         for script in scripts {
             page.inner.add_init_script_source(script).await?;
@@ -200,8 +275,16 @@ impl BrowserContext {
         self.inner.closed.load(Ordering::SeqCst)
     }
 
-    /// Close the context and all its pages.
-    pub async fn close(&self) -> Result<()> {
+    /// Close the context and all its pages; `.reason(..)` sets the message
+    /// of errors of operations interrupted by the closure.
+    pub fn close(&self) -> crate::page_extras::CloseContext {
+        crate::page_extras::CloseContext {
+            context: self.clone(),
+            reason: None,
+        }
+    }
+
+    pub(crate) async fn close_impl(&self) -> Result<()> {
         async {
             if self.inner.closed.swap(true, Ordering::SeqCst) {
                 return Ok(());
@@ -265,11 +348,17 @@ impl IntoFuture for NewContext {
     type IntoFuture = BoxFuture<Result<BrowserContext>>;
     fn into_future(self) -> Self::IntoFuture {
         Box::pin(async move {
-            self.browser
-                .inner
-                .create_context(self.options)
-                .await
-                .api("browser.newContext")
+            async {
+                crate::emulation::validate_options(&self.options)?;
+                let context = self.browser.inner.create_context(self.options).await?;
+                if let Err(err) = crate::emulation::init_context(&context).await {
+                    let _ = context.close().await;
+                    return Err(err);
+                }
+                Ok(context)
+            }
+            .await
+            .api("browser.newContext")
         })
     }
 }

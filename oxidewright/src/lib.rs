@@ -40,19 +40,40 @@
 mod browser;
 mod browser_context;
 mod browser_type;
+mod cdp_raw;
+mod clock;
+mod context_options;
+mod cookies;
+pub mod coverage;
+pub mod emulation;
 mod error;
 pub mod execution_context;
+mod ext;
 mod frame;
 pub mod js;
 mod js_handle;
 mod network;
 mod page;
+mod page_extras;
+mod pdf;
 mod progress;
+mod storage_state;
 mod url_match;
 
 pub use browser::Browser;
 pub use browser_context::{BrowserContext, NewContext, NewContextOptions};
 pub use browser_type::{BrowserType, ConnectOverCdp, Launch, LaunchOptions, chromium};
+pub use clock::{Clock, ClockInstall, ClockTicks, ClockTime};
+pub use context_options::{Device, devices};
+pub use cookies::{ClearCookies, Cookie, Cookies, SameSite, SetCookie, TextMatch};
+pub use coverage::{
+    CoverageRange, CssCoverageEntry, FunctionCoverage, JsCoverageEntry, StartCssCoverage,
+    StartJsCoverage, TextRange,
+};
+pub use emulation::{
+    ColorScheme, Contrast, EmulateMedia, ForcedColors, Geolocation, GrantPermissions, Media,
+    ReducedMotion, ServiceWorkerPolicy,
+};
 pub use error::{CONTEXT_DESTROYED_MESSAGE, Error, Result, TARGET_CLOSED_MESSAGE};
 pub use execution_context::{ExecutionContext, World};
 pub use frame::{
@@ -63,7 +84,12 @@ pub use js::JsValue;
 pub use js_handle::{ElementHandle, EvaluateHandleOn, EvaluateOn, JSHandle};
 pub use network::{Request, Response};
 pub use page::{AddInitScript, GoHistory, InitScript, Page, Reload, ViewportSize};
+pub use page_extras::{AddTag, CloseContext, ClosePage};
+pub use pdf::{Pdf, PdfLength, PdfMargin};
 pub use progress::DEFAULT_TIMEOUT;
+pub use storage_state::{
+    NameValue, OriginState, StorageState, StorageStateBuilder, StorageStateSource,
+};
 pub use url_match::{UrlMatch, glob_to_regex_pattern};
 
 /// Re-export of the underlying CDP library.

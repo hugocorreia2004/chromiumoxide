@@ -8,7 +8,6 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
-use chromiumoxide::cdp::browser_protocol::emulation::SetDeviceMetricsOverrideParams;
 use chromiumoxide::cdp::browser_protocol::network::{
     EnableParams as NetworkEnableParams, EventLoadingFailed, EventLoadingFinished,
     EventRequestWillBeSent, EventResponseReceived,
@@ -138,7 +137,8 @@ pub(crate) struct PageInner {
     timer_seq: AtomicU64,
     requests: Mutex<HashMap<String, Request>>,
     timer_tx: UnboundedSender<(String, u64)>,
-    viewport: Mutex<Option<ViewportSize>>,
+    pub(crate) viewport: Mutex<Option<ViewportSize>>,
+    pub(crate) ext: crate::ext::PageExt,
     /// Protocol events not yet applied; drained by the pump task and, for
     /// accessors, synchronously (see [`PageInner::sync`]).
     events: Mutex<Option<FutReceiver<Arc<dyn Event>>>>,
@@ -171,6 +171,7 @@ impl PageInner {
             requests: Mutex::new(HashMap::new()),
             timer_tx,
             viewport: Mutex::new(None),
+            ext: Default::default(),
             events: Mutex::new(None),
             self_weak: weak.clone(),
         });
@@ -549,6 +550,9 @@ impl PageInner {
             return;
         }
         self.remove_child_frames(state, id, fx);
+        if let Some(context) = self.context.upgrade() {
+            context.ext.add_visited_url(&url);
+        }
         let data = state.frames.get_mut(id).unwrap();
         data.url = url.clone();
         data.name = name;
@@ -1172,17 +1176,7 @@ impl PageInner {
     }
 
     pub(crate) async fn apply_viewport(&self, viewport: ViewportSize) -> Result<()> {
-        let mut params = SetDeviceMetricsOverrideParams::new(
-            viewport.width as i64,
-            viewport.height as i64,
-            1.0,
-            false,
-        );
-        params.screen_width = Some(viewport.width as i64);
-        params.screen_height = Some(viewport.height as i64);
-        self.cdp.execute(params).await?;
-        *self.viewport.lock().unwrap() = Some(viewport);
-        Ok(())
+        crate::emulation::set_page_viewport(self, viewport).await
     }
 
     pub(crate) async fn add_init_script_source(
@@ -1472,8 +1466,17 @@ impl Page {
         self.inner.is_closed()
     }
 
-    /// Close the page.
-    pub async fn close(&self) -> Result<()> {
+    /// Close the page; see [`crate::ClosePage`] for `run_before_unload` and
+    /// `reason`.
+    pub fn close(&self) -> crate::page_extras::ClosePage {
+        crate::page_extras::ClosePage {
+            page: self.clone(),
+            run_before_unload: false,
+            reason: None,
+        }
+    }
+
+    pub(crate) async fn close_impl(&self) -> Result<()> {
         async {
             if self.inner.is_closed() {
                 return Ok(());
