@@ -1,5 +1,5 @@
 use crate::build::SerdeSupport;
-use crate::pdl::{Command, DataType, Domain, Event, Item, Param, Type, TypeDef, Variant};
+use crate::pdl::{Command, DataType, Domain, Event, Item, Param, TypeDef, Variant};
 use heck::ToUpperCamelCase;
 use proc_macro2::{Ident, TokenStream};
 use quote::{ToTokens, quote};
@@ -280,10 +280,11 @@ impl FieldDefinition {
                 #[serde(rename = #name)]
 
             });
+            // A mandatory array is always serialized, even when empty: the
+            // browser rejects a command whose mandatory field is missing
+            // (e.g. `Storage.setCookies` with no cookies).
             if self.optional {
                 serde_attr.extend(serde_support.generate_opt_field_attr());
-            } else if let Type::ArrayOf(_) = &param.r#type {
-                serde_attr.extend(serde_support.generate_vec_field_attr());
             }
 
             if self.is_enum {

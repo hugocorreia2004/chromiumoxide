@@ -14,6 +14,7 @@ use chromiumoxide_cdp::cdp::CdpEventMessage;
 use chromiumoxide_cdp::cdp::browser_protocol::fetch::{
     self, ContinueRequestParams, RequestPattern,
 };
+use chromiumoxide_cdp::cdp::browser_protocol::network::LoaderId;
 #[allow(deprecated)]
 use chromiumoxide_cdp::cdp::browser_protocol::network::{
     EmulateNetworkConditionsParams, Headers, SetCacheDisabledParams, SetExtraHttpHeadersParams,
@@ -42,8 +43,8 @@ use crate::handler::browser::BrowserContext;
 use crate::handler::domworld::DOMWorldKind;
 use crate::handler::emulation::EmulationManager;
 use crate::handler::frame::{
-    FrameEvent, FrameManager, FrameWaitError, NavigationError, NavigationId, NavigationOk,
-    PreloadId,
+    FrameEvent, FrameManager, FrameWaitError, IsolatedWorldSlot, NavigationError, NavigationId,
+    NavigationOk, PreloadId,
 };
 use crate::handler::frame::{FrameNavigationRequest, UTILITY_WORLD_NAME};
 use crate::handler::network::{NetworkCommand, NetworkEvent, NetworkManager, PauseDisposition};
@@ -175,6 +176,14 @@ pub struct Target {
     wait_for_navigation_results: Vec<Sender<Result<ArcHttpRequest>>>,
     /// The sender who requested the page.
     initiator: Option<Sender<Result<Page>>>,
+    /// After this instant the page is handed to its initiator even if the
+    /// main frame never finished loading, so `Browser::new_page` cannot hang
+    /// on a document that never fires `load`.
+    initiator_deadline: Option<Instant>,
+    /// Page-facing waiters for a lifecycle event of the main frame.
+    lifecycle_waiters: Vec<(MethodId, Sender<Result<ArcHttpRequest>>)>,
+    /// Notified once this target is torn down.
+    close_waiters: Vec<Sender<()>>,
 }
 
 impl Target {
@@ -208,6 +217,9 @@ impl Target {
             paused_request_sink: None,
             page_exposed: false,
             initiator: None,
+            initiator_deadline: None,
+            lifecycle_waiters: Vec::new(),
+            close_waiters: Vec::new(),
             browser_context,
         }
     }
@@ -271,6 +283,16 @@ impl Target {
             .navigate_frame_in_session(session_id, frame_id, req);
     }
 
+    /// The `Page.navigate` of a navigation was answered without an error.
+    pub(crate) fn on_navigation_response(
+        &mut self,
+        navigation_id: NavigationId,
+        loader_id: Option<LoaderId>,
+    ) {
+        self.frame_manager
+            .on_navigation_response(navigation_id, loader_id);
+    }
+
     pub(crate) fn on_navigation_failed(&mut self, navigation_id: NavigationId, error_text: String) {
         self.frame_manager
             .fail_navigation_by_nav_id(navigation_id, error_text);
@@ -301,6 +323,38 @@ impl Target {
                 .frame_manager
                 .frame(frame_id)
                 .is_some_and(|frame| frame.session_id() == Some(session_id))
+    }
+
+    /// Resolve the isolated-world slot of a frame for a page-side caller.
+    fn isolated_world_slot(
+        &self,
+        frame_id: Option<FrameId>,
+        expected_session_id: Option<SessionId>,
+    ) -> Result<IsolatedWorldSlot> {
+        let frame_id = match frame_id {
+            Some(frame_id) => frame_id,
+            None => self
+                .frame_manager
+                .main_frame()
+                .map(|frame| frame.id().clone())
+                .ok_or(CdpError::FrameNotReady)?,
+        };
+        // A handle pinned to a session reports any loss of that binding,
+        // including a removed frame, as `FrameNotReady`.
+        if let Some(session_id) = expected_session_id.as_ref() {
+            if !self.frame_ready(&frame_id, session_id) {
+                return Err(CdpError::FrameNotReady);
+            }
+        }
+        let slot = self
+            .frame_manager
+            .isolated_world_slot(&frame_id)
+            .ok_or_else(|| CdpError::FrameNotFound(frame_id.clone()))?;
+        if self.frame_session_ready(&slot.session_id) {
+            Ok(slot)
+        } else {
+            Err(CdpError::FrameNotReady)
+        }
     }
 
     fn build_frame_info(&self, frame: &crate::handler::frame::Frame) -> Result<FrameInfo> {
@@ -528,6 +582,11 @@ impl Target {
     ) -> CommandChain {
         match phase {
             InitPhase::Frame => FrameManager::init_commands(self.config.request_timeout),
+            // With `stealth` no utility world is registered for a child target.
+            InitPhase::IsolatedWorld if cfg!(feature = "stealth") => CommandChain::new(
+                Vec::<(MethodId, serde_json::Value)>::new(),
+                self.config.request_timeout,
+            ),
             InitPhase::IsolatedWorld => self
                 .frame_manager
                 .ensure_isolated_world_on_next_document_in_session(
@@ -994,23 +1053,23 @@ impl Target {
                 TargetEvent::NavigationRequest(_, _) => {}
                 TargetEvent::NavigationResult(_) => {}
                 TargetEvent::Command(command) => {
-                    let _ = command.sender.send(Err(CdpError::NoResponse));
+                    let _ = command.sender.send(Err(CdpError::TargetClosed));
                 }
                 TargetEvent::RegisterChildSession(_) => {}
                 TargetEvent::UnregisterChildSession(_) => {}
                 TargetEvent::SessionDraining(_) => {}
                 TargetEvent::FrameNavigate { tx, .. } => {
-                    let _ = tx.send(Err(CdpError::NoResponse));
+                    let _ = tx.send(Err(CdpError::TargetClosed));
                 }
                 TargetEvent::FrameWaitForNavigation { tx, .. } => {
                     let _ = tx.send(Err(FrameWaitError::FrameSwappedOrDetached));
                 }
                 TargetEvent::QueuePreloadScript { .. } => {}
                 TargetEvent::AddPreloadScript { tx, .. } => {
-                    let _ = tx.send(Err(CdpError::NoResponse));
+                    let _ = tx.send(Err(CdpError::TargetClosed));
                 }
                 TargetEvent::FanOutAckBatch(batch) => {
-                    let _ = batch.ack_tx.send(Err(CdpError::NoResponse));
+                    let _ = batch.ack_tx.send(Err(CdpError::TargetClosed));
                 }
             }
         }
@@ -1019,7 +1078,7 @@ impl Target {
     fn settle_target_message_on_teardown(message: TargetMessage) {
         match message {
             TargetMessage::Command(command) => {
-                let _ = command.sender.send(Err(CdpError::NoResponse));
+                let _ = command.sender.send(Err(CdpError::TargetClosed));
             }
             TargetMessage::MainFrame(tx) => {
                 let _ = tx.send(None);
@@ -1051,45 +1110,54 @@ impl Target {
         match message {
             InternalTargetMessage::FrameCommand { command, .. }
             | InternalTargetMessage::SessionCommand { command, .. } => {
-                let _ = command.sender.send(Err(CdpError::NoResponse));
+                let _ = command.sender.send(Err(CdpError::TargetClosed));
             }
             InternalTargetMessage::FrameNavigate { tx, .. } => {
-                let _ = tx.send(Err(CdpError::NoResponse));
+                let _ = tx.send(Err(CdpError::TargetClosed));
             }
             InternalTargetMessage::FrameWaitForNavigation { tx, .. } => {
                 let _ = tx.send(Err(FrameWaitError::FrameSwappedOrDetached));
             }
-            InternalTargetMessage::WaitForNavigationResult { tx } => {
-                let _ = tx.send(Err(CdpError::FrameNotReady));
+            InternalTargetMessage::WaitForNavigationResult { tx }
+            | InternalTargetMessage::WaitForLifecycle { tx, .. } => {
+                let _ = tx.send(Err(CdpError::TargetClosed));
             }
+            InternalTargetMessage::WaitForClose { tx } => {
+                let _ = tx.send(());
+            }
+            InternalTargetMessage::GetIsolatedWorld { tx, .. } => {
+                let _ = tx.send(Err(CdpError::TargetClosed));
+            }
+            InternalTargetMessage::StoreIsolatedWorld { .. }
+            | InternalTargetMessage::ForgetIsolatedWorld { .. } => {}
             InternalTargetMessage::GetPinnedExecutionContext { tx, .. } => {
-                let _ = tx.send(Err(CdpError::NoResponse));
+                let _ = tx.send(Err(CdpError::TargetClosed));
             }
             InternalTargetMessage::GetFrameInfo { tx, .. } => {
-                let _ = tx.send(Err(CdpError::NoResponse));
+                let _ = tx.send(Err(CdpError::TargetClosed));
             }
             InternalTargetMessage::GetAllFrames { tx } => {
                 let _ = tx.send(Vec::new());
             }
             InternalTargetMessage::GetFrameBoundaryChain { tx, .. } => {
-                let _ = tx.send(Err(CdpError::NoResponse));
+                let _ = tx.send(Err(CdpError::TargetClosed));
             }
             InternalTargetMessage::RegisterPausedRequestStream { tx, .. } => {
                 // The event and command side channels close when this message
                 // is dropped after its acknowledgement is settled.
-                let _ = tx.send(Err(CdpError::NoResponse));
+                let _ = tx.send(Err(CdpError::TargetClosed));
             }
             InternalTargetMessage::AddPreloadScript { tx, .. } => {
-                let _ = tx.send(Err(CdpError::NoResponse));
+                let _ = tx.send(Err(CdpError::TargetClosed));
             }
             InternalTargetMessage::RegisterEventListener { tx, .. } => {
-                let _ = tx.send(Err(CdpError::NoResponse));
+                let _ = tx.send(Err(CdpError::TargetClosed));
             }
             InternalTargetMessage::SetCredentials { tx, .. } => {
-                let _ = tx.send(Err(CdpError::NoResponse));
+                let _ = tx.send(Err(CdpError::TargetClosed));
             }
             InternalTargetMessage::SetRequestInterception { tx, .. } => {
-                let _ = tx.send(Err(CdpError::NoResponse));
+                let _ = tx.send(Err(CdpError::TargetClosed));
             }
         }
     }
@@ -1115,11 +1183,17 @@ impl Target {
             let _ = tx.send(None);
         }
         for tx in mem::take(&mut self.wait_for_navigation_results) {
-            let _ = tx.send(Err(CdpError::FrameNotReady));
+            let _ = tx.send(Err(CdpError::TargetClosed));
+        }
+        for (_, tx) in mem::take(&mut self.lifecycle_waiters) {
+            let _ = tx.send(Err(CdpError::TargetClosed));
         }
         self.frame_manager.clear_isolated_world_registrations();
         if let Some(initiator) = self.initiator.take() {
-            let _ = initiator.send(Err(CdpError::NoResponse));
+            let _ = initiator.send(Err(CdpError::TargetClosed));
+        }
+        for tx in mem::take(&mut self.close_waiters) {
+            let _ = tx.send(());
         }
     }
 
@@ -1435,6 +1509,11 @@ impl Target {
                 self.network_manager.on_network_loading_finished(ev)
             }
             CdpEvent::NetworkLoadingFailed(ev) => {
+                self.frame_manager.on_request_failed(
+                    event_session_id.as_ref(),
+                    ev.request_id.as_ref(),
+                    &ev.error_text,
+                );
                 self.network_manager.on_network_loading_failed(ev)
             }
             // This matches Chrome's full `CdpEvent` set (not the internal
@@ -1513,9 +1592,14 @@ impl Target {
                                 );
                             } else {
                                 self.main_isolated_world_attempted = true;
-                                if let Some(isolated_world_cmds) =
+                                // With `stealth` no utility world is created at
+                                // attach: worlds are created on demand.
+                                let utility_world = if cfg!(feature = "stealth") {
+                                    None
+                                } else {
                                     self.frame_manager.ensure_isolated_world(UTILITY_WORLD_NAME)
-                                {
+                                };
+                                if let Some(isolated_world_cmds) = utility_world {
                                     *cmds = isolated_world_cmds;
                                 } else {
                                     self.init_state = TargetInit::InitializingNetwork(
@@ -1566,13 +1650,23 @@ impl Target {
             }
             TargetInit::Initialized => {
                 if let Some(initiator) = self.initiator.take() {
-                    // make sure that the main frame of the page has finished loading
-                    if self
+                    // make sure that the main frame of the page has finished
+                    // loading, or that it had its configured time to do so
+                    let loaded = self
                         .frame_manager
                         .main_frame()
                         .map(|frame| frame.is_loaded())
-                        .unwrap_or_default()
-                    {
+                        .unwrap_or_default();
+                    let expired = self
+                        .initiator_deadline
+                        .is_some_and(|deadline| now > deadline);
+                    if expired && !loaded {
+                        tracing::debug!(
+                            target_id = ?self.target_id(),
+                            "main frame did not finish loading in time; handing the page over"
+                        );
+                    }
+                    if loaded || expired {
                         if let Some(page) = self.get_or_create_page() {
                             let page = Page::from(page.clone());
                             let delivered = initiator.send(Ok(page)).is_ok();
@@ -1595,6 +1689,18 @@ impl Target {
                     }
                     while let Some(tx) = self.wait_for_navigation_results.pop() {
                         let _ = tx.send(Ok(frame.http_request().cloned()));
+                    }
+                }
+                if !self.lifecycle_waiters.is_empty() {
+                    for (event, tx) in mem::take(&mut self.lifecycle_waiters) {
+                        if tx.is_canceled() {
+                            continue;
+                        }
+                        if self.frame_manager.frame_reached_lifecycle(frame, &event) {
+                            let _ = tx.send(Ok(frame.http_request().cloned()));
+                        } else {
+                            self.lifecycle_waiters.push((event, tx));
+                        }
                     }
                 }
             }
@@ -1783,6 +1889,38 @@ impl Target {
                                 tx,
                             });
                     }
+                    InternalTargetMessage::WaitForLifecycle { event, tx } => {
+                        self.lifecycle_waiters.push((event, tx));
+                    }
+                    InternalTargetMessage::WaitForClose { tx } => {
+                        self.close_waiters.push(tx);
+                    }
+                    InternalTargetMessage::GetIsolatedWorld {
+                        frame_id,
+                        expected_session_id,
+                        tx,
+                    } => {
+                        let _ = tx.send(self.isolated_world_slot(frame_id, expected_session_id));
+                    }
+                    InternalTargetMessage::StoreIsolatedWorld { slot, context_id } => {
+                        self.frame_manager.store_isolated_world(
+                            &slot.frame_id,
+                            &slot.session_id,
+                            slot.generation,
+                            context_id,
+                        );
+                    }
+                    InternalTargetMessage::ForgetIsolatedWorld {
+                        frame_id,
+                        session_id,
+                        context_id,
+                    } => {
+                        self.frame_manager.forget_isolated_world(
+                            &frame_id,
+                            &session_id,
+                            context_id,
+                        );
+                    }
                     InternalTargetMessage::WaitForNavigationResult { tx } => {
                         if let Some(frame) = self.frame_manager.main_frame() {
                             if frame.is_loaded() {
@@ -1931,8 +2069,11 @@ impl Target {
     /// target
     pub fn set_initiator(&mut self, tx: Sender<Result<Page>>) {
         self.initiator = Some(tx);
+        self.initiator_deadline = Some(Instant::now() + self.config.request_timeout);
     }
 
+    /// With the `stealth` feature only auto-attach is sent: `Log.enable` and
+    /// `Performance.enable` are left to the caller.
     pub(crate) fn page_init_commands(timeout: Duration) -> CommandChain {
         let attach = SetAutoAttachParams::builder()
             .flatten(true)
@@ -1940,22 +2081,20 @@ impl Target {
             .wait_for_debugger_on_start(true)
             .build()
             .unwrap();
-        let enable_performance = performance::EnableParams::default();
-        let enable_log = cdplog::EnableParams::default();
-        CommandChain::new(
-            vec![
-                (attach.identifier(), serde_json::to_value(attach).unwrap()),
-                (
-                    enable_performance.identifier(),
-                    serde_json::to_value(enable_performance).unwrap(),
-                ),
-                (
-                    enable_log.identifier(),
-                    serde_json::to_value(enable_log).unwrap(),
-                ),
-            ],
-            timeout,
-        )
+        let mut commands = vec![(attach.identifier(), serde_json::to_value(attach).unwrap())];
+        if !cfg!(feature = "stealth") {
+            let enable_performance = performance::EnableParams::default();
+            let enable_log = cdplog::EnableParams::default();
+            commands.push((
+                enable_performance.identifier(),
+                serde_json::to_value(enable_performance).unwrap(),
+            ));
+            commands.push((
+                enable_log.identifier(),
+                serde_json::to_value(enable_log).unwrap(),
+            ));
+        }
+        CommandChain::new(commands, timeout)
     }
 }
 
@@ -2161,6 +2300,33 @@ pub(crate) enum InternalTargetMessage {
     },
     WaitForNavigationResult {
         tx: Sender<Result<ArcHttpRequest>>,
+    },
+    /// Resolve once the main frame fired `event` for its current document.
+    WaitForLifecycle {
+        event: MethodId,
+        tx: Sender<Result<ArcHttpRequest>>,
+    },
+    /// Resolve once this target is torn down.
+    WaitForClose {
+        tx: Sender<()>,
+    },
+    /// The isolated world cached for a frame (`None`: the main frame). With
+    /// `expected_session_id` the frame must still be bound to that session.
+    GetIsolatedWorld {
+        frame_id: Option<FrameId>,
+        expected_session_id: Option<SessionId>,
+        tx: Sender<Result<IsolatedWorldSlot>>,
+    },
+    /// Cache a world created for a frame's document.
+    StoreIsolatedWorld {
+        slot: IsolatedWorldSlot,
+        context_id: ExecutionContextId,
+    },
+    /// Drop a cached world the browser reported as gone.
+    ForgetIsolatedWorld {
+        frame_id: FrameId,
+        session_id: SessionId,
+        context_id: ExecutionContextId,
     },
     GetPinnedExecutionContext {
         dom_world: DOMWorldKind,
@@ -2614,6 +2780,7 @@ mod tests {
         request
     }
 
+    #[cfg(not(feature = "stealth"))]
     fn advance_child_to_isolated_world(
         target: &mut Target,
         child_session: &SessionId,
@@ -2708,6 +2875,7 @@ mod tests {
         }
     }
 
+    #[cfg(not(feature = "stealth"))]
     fn isolated_execution_context(
         frame_id: &str,
         context_id: i64,
@@ -3822,6 +3990,8 @@ mod tests {
         )));
     }
 
+    // Exercises the utility world and `Runtime.enable`, which `stealth` omits.
+    #[cfg(not(feature = "stealth"))]
     #[test]
     fn iframe_init_optional_error_skips_to_recursive_auto_attach() {
         let (mut target, _) = initialized_target();
@@ -3866,6 +4036,8 @@ mod tests {
         );
     }
 
+    // Exercises the utility world and `Runtime.enable`, which `stealth` omits.
+    #[cfg(not(feature = "stealth"))]
     #[test]
     fn iframe_init_isolated_world_success_confirms_registration() {
         let (mut target, _) = initialized_target();
@@ -3902,6 +4074,170 @@ mod tests {
         assert_eq!(auto_attach.method.as_ref(), "Target.setAutoAttach");
     }
 
+    /// Methods sent while a fresh target and one of its child sessions
+    /// initialize, every command answered successfully.
+    fn initialization_methods() -> Vec<String> {
+        let mut target = test_target();
+        let main_session = session("main");
+        target.set_session_id(main_session.clone());
+        let now = Instant::now();
+        let mut methods = Vec::new();
+        // AttachToTarget, then the main-session chains.
+        for _ in 0..64 {
+            match poll_target(&mut target, now) {
+                Some(TargetEvent::Request(request)) => {
+                    methods.push(request.method.as_ref().to_owned());
+                    let result = if request.method.as_ref() == GetFrameTreeParams::IDENTIFIER {
+                        frame_tree_result("main-frame")
+                    } else {
+                        json!({})
+                    };
+                    target.on_response_in_session(
+                        ok_response(result),
+                        request.method.as_ref(),
+                        Some(main_session.clone()),
+                    );
+                }
+                Some(_) => {}
+                None => break,
+            }
+        }
+        assert!(target.is_initialized(), "main initialization completes");
+
+        let child_session = session("child");
+        target.on_event(attach_event_message(
+            &main_session,
+            attached_event("child-frame", &child_session),
+        ));
+        for _ in 0..64 {
+            match poll_target(&mut target, now) {
+                Some(TargetEvent::Request(request)) => {
+                    methods.push(request.method.as_ref().to_owned());
+                    let result = if request.method.as_ref() == GetFrameTreeParams::IDENTIFIER {
+                        frame_tree_result("child-frame")
+                    } else {
+                        json!({})
+                    };
+                    let session_id = request.session_id.clone().map(SessionId::new);
+                    target.on_response_in_session(
+                        ok_response(result),
+                        request.method.as_ref(),
+                        session_id,
+                    );
+                }
+                Some(_) => {}
+                None => break,
+            }
+        }
+        methods
+    }
+
+    #[cfg(feature = "stealth")]
+    #[test]
+    fn stealth_initialization_sends_no_detectable_commands() {
+        let methods = initialization_methods();
+        for forbidden in [
+            "Runtime.enable",
+            "Log.enable",
+            "Performance.enable",
+            "Page.addScriptToEvaluateOnNewDocument",
+            "Page.createIsolatedWorld",
+            "Runtime.addBinding",
+        ] {
+            assert!(
+                !methods.iter().any(|method| method == forbidden),
+                "{forbidden} sent during initialization: {methods:?}"
+            );
+        }
+        // Paused child targets are still resumed.
+        assert!(
+            methods
+                .iter()
+                .any(|method| method == "Runtime.runIfWaitingForDebugger")
+        );
+        assert!(
+            methods
+                .iter()
+                .any(|method| method == "Page.setLifecycleEventsEnabled")
+        );
+    }
+
+    #[cfg(not(feature = "stealth"))]
+    #[test]
+    fn default_initialization_enables_runtime_and_the_utility_world() {
+        let methods = initialization_methods();
+        for expected in [
+            "Runtime.enable",
+            "Log.enable",
+            "Performance.enable",
+            "Page.addScriptToEvaluateOnNewDocument",
+        ] {
+            assert!(
+                methods.iter().any(|method| method == expected),
+                "{expected} missing from {methods:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn isolated_world_slot_follows_frame_session_and_navigation() {
+        let (mut target, main_session) = initialized_target();
+        let main_frame = FrameId::new("main-frame");
+
+        let slot = target
+            .isolated_world_slot(None, None)
+            .expect("main frame slot");
+        assert_eq!(slot.frame_id, main_frame);
+        assert_eq!(slot.session_id, main_session);
+        assert_eq!(slot.context_id, None);
+
+        assert!(target.frame_manager.store_isolated_world(
+            &main_frame,
+            &main_session,
+            slot.generation,
+            ExecutionContextId::new(7),
+        ));
+        assert_eq!(
+            target
+                .isolated_world_slot(Some(main_frame.clone()), Some(main_session.clone()))
+                .expect("pinned slot")
+                .context_id,
+            Some(ExecutionContextId::new(7))
+        );
+        // A caller pinned to another session is refused.
+        assert!(matches!(
+            target.isolated_world_slot(Some(main_frame.clone()), Some(session("other"))),
+            Err(CdpError::FrameNotReady)
+        ));
+        assert!(matches!(
+            target.isolated_world_slot(Some(FrameId::new("missing")), None),
+            Err(CdpError::FrameNotFound(_))
+        ));
+        assert!(matches!(
+            target.isolated_world_slot(Some(FrameId::new("missing")), Some(main_session.clone())),
+            Err(CdpError::FrameNotReady)
+        ));
+
+        // A cross-document navigation of the frame drops the world.
+        target.on_event(CdpEventMessage {
+            method: "Page.frameNavigated".into(),
+            session_id: Some(main_session.as_ref().to_owned()),
+            params: CdpEvent::PageFrameNavigated(Box::new(
+                chromiumoxide_cdp::cdp::browser_protocol::page::EventFrameNavigated {
+                    frame: cdp_frame("main-frame", None),
+                    r#type:
+                        chromiumoxide_cdp::cdp::browser_protocol::page::NavigationType::Navigation,
+                },
+            )),
+        });
+        let after = target
+            .isolated_world_slot(None, None)
+            .expect("main frame slot");
+        assert_eq!(after.context_id, None);
+        assert_ne!(after.generation, slot.generation);
+    }
+
+    #[cfg(not(feature = "stealth"))]
     #[test]
     fn main_isolated_world_protocol_error_attempts_add_script_once_then_enters_network_init() {
         let (mut target, main_session) = initialized_target();
@@ -3973,6 +4309,8 @@ mod tests {
         ));
     }
 
+    // Exercises the utility world and `Runtime.enable`, which `stealth` omits.
+    #[cfg(not(feature = "stealth"))]
     #[test]
     fn iframe_init_isolated_world_timeout_stays_pending_and_unpauses() {
         let timeout = Duration::from_millis(1);
@@ -4255,6 +4593,8 @@ mod tests {
         );
     }
 
+    // Exercises the utility world and `Runtime.enable`, which `stealth` omits.
+    #[cfg(not(feature = "stealth"))]
     #[test]
     fn iframe_init_post_chain_replays_latest_state_before_unpause_and_becomes_ready() {
         let (mut target, _) = initialized_target();
@@ -4549,10 +4889,10 @@ mod tests {
 
         target.settle_whole_target_teardown();
 
-        assert!(matches!(block_on(wait), Err(CdpError::FrameNotReady)));
+        assert!(matches!(block_on(wait), Err(CdpError::TargetClosed)));
         assert!(matches!(
             block_on(command_rx).expect("command sender resolves"),
-            Err(CdpError::NoResponse)
+            Err(CdpError::TargetClosed)
         ));
         assert!(
             block_on(legacy_rx)
@@ -4561,11 +4901,11 @@ mod tests {
         );
         assert!(matches!(
             block_on(promoted_rx).expect("promoted waiter resolves"),
-            Err(CdpError::FrameNotReady)
+            Err(CdpError::TargetClosed)
         ));
         assert!(matches!(
             block_on(initiator_rx).expect("initiator resolves"),
-            Err(CdpError::NoResponse)
+            Err(CdpError::TargetClosed)
         ));
         assert_eq!(
             target
@@ -4626,7 +4966,7 @@ mod tests {
         assert_eq!(target.wait_for_navigation_results.len(), 1);
 
         target.settle_whole_target_teardown();
-        assert!(matches!(block_on(page_wait), Err(CdpError::FrameNotReady)));
+        assert!(matches!(block_on(page_wait), Err(CdpError::TargetClosed)));
 
         let (mut target, _) = initialized_target();
         let page = target
@@ -4657,10 +4997,7 @@ mod tests {
         assert_eq!(target.wait_for_navigation_results.len(), 1);
 
         target.settle_whole_target_teardown();
-        assert!(matches!(
-            block_on(http_future),
-            Err(CdpError::FrameNotReady)
-        ));
+        assert!(matches!(block_on(http_future), Err(CdpError::TargetClosed)));
     }
 
     #[test]
@@ -4959,11 +5296,11 @@ mod tests {
         assert!(target.queued_events.is_empty());
         assert!(matches!(
             block_on(command_rx).expect("command sender resolves"),
-            Err(CdpError::NoResponse)
+            Err(CdpError::TargetClosed)
         ));
         assert!(matches!(
             block_on(navigate_rx).expect("navigation sender resolves"),
-            Err(CdpError::NoResponse)
+            Err(CdpError::TargetClosed)
         ));
         assert_eq!(
             block_on(wait_rx).expect("wait sender resolves"),
@@ -4971,11 +5308,11 @@ mod tests {
         );
         assert!(matches!(
             block_on(preload_rx).expect("preload sender resolves"),
-            Err(CdpError::NoResponse)
+            Err(CdpError::TargetClosed)
         ));
         assert!(matches!(
             block_on(ack_rx).expect("fan-out ack sender resolves"),
-            Err(CdpError::NoResponse)
+            Err(CdpError::TargetClosed)
         ));
     }
 }

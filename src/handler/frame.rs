@@ -29,6 +29,8 @@ use crate::{ArcHttpRequest, cmd::CommandChain};
 
 pub const UTILITY_WORLD_NAME: &str = "__chromiumoxide_utility_world__";
 pub(crate) const HTTP_RESPONSE_CODE_FAILURE: &str = "net::ERR_HTTP_RESPONSE_CODE_FAILURE";
+/// Reported when a frame stops loading before the navigated document commits.
+pub(crate) const NAVIGATION_ABORTED: &str = "net::ERR_ABORTED";
 const EVALUATION_SCRIPT_URL: &str = "____chromiumoxide_utility_world___evaluation_script__";
 
 /// Represents a frame on the page
@@ -54,6 +56,13 @@ pub struct Frame {
     security_origin: String,
     /// The received lifecycle events
     lifecycle_events: HashSet<MethodId>,
+    /// Isolated world created on demand for this frame's current document
+    /// (used by the `stealth` feature instead of contexts reported by
+    /// `Runtime.enable`).
+    isolated_world: Option<ExecutionContextId>,
+    /// Bumped whenever the cached isolated world becomes invalid, so a world
+    /// created for an older document is never stored for a newer one.
+    world_generation: u64,
 }
 
 impl Frame {
@@ -71,6 +80,8 @@ impl Frame {
             session_id: None,
             security_origin: String::new(),
             lifecycle_events: Default::default(),
+            isolated_world: None,
+            world_generation: 0,
         }
     }
 
@@ -89,6 +100,8 @@ impl Frame {
             session_id: None,
             security_origin: String::new(),
             lifecycle_events: Default::default(),
+            isolated_world: None,
+            world_generation: 0,
         }
     }
 
@@ -160,6 +173,15 @@ impl Frame {
         };
         self.url = Some(url);
         self.security_origin.clone_from(&frame.security_origin);
+        // A new document: its worlds are new too. A cached id would point at
+        // a destroyed context, or after a process swap at an unrelated one.
+        self.reset_isolated_world();
+    }
+
+    /// Forget the cached isolated world of this frame.
+    fn reset_isolated_world(&mut self) {
+        self.isolated_world = None;
+        self.world_generation = self.world_generation.wrapping_add(1);
     }
 
     fn navigated_within_url(&mut self, url: String) {
@@ -183,6 +205,7 @@ impl Frame {
     pub fn clear_contexts(&mut self) {
         self.main_world.take_context();
         self.secondary_world.take_context();
+        self.reset_isolated_world();
     }
 
     pub fn destroy_context(&mut self, ctx_unique_id: &str) {
@@ -217,6 +240,8 @@ impl From<CdpFrame> for Frame {
             session_id: None,
             security_origin: frame.security_origin,
             lifecycle_events: Default::default(),
+            isolated_world: None,
+            world_generation: 0,
         }
     }
 }
@@ -272,6 +297,16 @@ struct ContextBinding {
 struct UniqueContext {
     frame_id: FrameId,
     key: Option<ContextKey>,
+}
+
+/// A frame's cached isolated world, as handed to a page-side caller.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(not(feature = "stealth"), allow(dead_code))]
+pub(crate) struct IsolatedWorldSlot {
+    pub(crate) frame_id: FrameId,
+    pub(crate) session_id: SessionId,
+    pub(crate) generation: u64,
+    pub(crate) context_id: Option<ExecutionContextId>,
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -339,29 +374,33 @@ impl FrameManager {
     }
 
     /// The commands to execute in order to initialize this frame manager
+    ///
+    /// With the `stealth` feature `Runtime.enable` is not sent: it makes the
+    /// browser report console calls and execution contexts, which page
+    /// scripts can detect.
     pub fn init_commands(timeout: Duration) -> CommandChain {
         let enable = page::EnableParams::default();
         let get_tree = page::GetFrameTreeParams::default();
         let set_lifecycle = page::SetLifecycleEventsEnabledParams::new(true);
-        let enable_runtime = runtime::EnableParams::default();
-        CommandChain::new(
-            vec![
-                (enable.identifier(), serde_json::to_value(enable).unwrap()),
-                (
-                    get_tree.identifier(),
-                    serde_json::to_value(get_tree).unwrap(),
-                ),
-                (
-                    set_lifecycle.identifier(),
-                    serde_json::to_value(set_lifecycle).unwrap(),
-                ),
-                (
-                    enable_runtime.identifier(),
-                    serde_json::to_value(enable_runtime).unwrap(),
-                ),
-            ],
-            timeout,
-        )
+        let mut commands = vec![
+            (enable.identifier(), serde_json::to_value(enable).unwrap()),
+            (
+                get_tree.identifier(),
+                serde_json::to_value(get_tree).unwrap(),
+            ),
+            (
+                set_lifecycle.identifier(),
+                serde_json::to_value(set_lifecycle).unwrap(),
+            ),
+        ];
+        if !cfg!(feature = "stealth") {
+            let enable_runtime = runtime::EnableParams::default();
+            commands.push((
+                enable_runtime.identifier(),
+                serde_json::to_value(enable_runtime).unwrap(),
+            ));
+        }
+        CommandChain::new(commands, timeout)
     }
 
     pub fn main_frame(&self) -> Option<&Frame> {
@@ -454,14 +493,37 @@ impl FrameManager {
     }
 
     fn check_lifecycle(&self, watcher: &NavigationWatcher, frame: &Frame) -> bool {
-        watcher.expected_lifecycle.iter().all(|ev| {
-            frame.lifecycle_events.contains(ev)
-                || (frame.url.is_none() && frame.lifecycle_events.contains("DOMContentLoaded"))
-        }) && frame
+        watcher
+            .expected_lifecycle
+            .iter()
+            .all(|event| self.frame_reached_lifecycle(frame, event))
+    }
+
+    /// Whether `frame` fired the lifecycle `event` for its current document.
+    ///
+    /// The browser's own `load` and `DOMContentLoaded` already wait for the
+    /// subframes that block them, so only the frame itself is checked: a
+    /// subframe that is attached later, lazy, or never finishes (ads,
+    /// trackers) must not hold the navigation back. The network idle events
+    /// are per frame, so they are required from every subframe that has
+    /// started loading.
+    pub(crate) fn frame_reached_lifecycle(&self, frame: &Frame, event: &str) -> bool {
+        let own = frame.lifecycle_events.contains(event)
+            || (frame.url.is_none() && frame.lifecycle_events.contains("DOMContentLoaded"));
+        if !own {
+            return false;
+        }
+        if event == LifecycleEvent::Load.as_ref()
+            || event == LifecycleEvent::DomcontentLoaded.as_ref()
+        {
+            return true;
+        }
+        frame
             .child_frames
             .iter()
-            .filter_map(|f| self.frames.get(f))
-            .all(|f| self.check_lifecycle(watcher, f))
+            .filter_map(|child| self.frames.get(child))
+            .filter(|child| !child.lifecycle_events.is_empty())
+            .all(|child| self.frame_reached_lifecycle(child, event))
     }
 
     fn check_lifecycle_complete(
@@ -503,6 +565,7 @@ impl FrameManager {
             Timeout(Instant),
             FrameMissing(FrameId),
             Complete(NavigationCompletion),
+            Failed(String),
         }
 
         let navigation_keys = self.navigation.keys().cloned().collect::<Vec<_>>();
@@ -513,6 +576,12 @@ impl FrameManager {
             };
             let outcome = if now > entry.deadline {
                 Some(ScanOutcome::Timeout(entry.deadline))
+            } else if let Some(error_text) = entry
+                .watcher
+                .as_ref()
+                .and_then(|watcher| watcher.failure.clone())
+            {
+                Some(ScanOutcome::Failed(error_text))
             } else if let Some(watcher) = entry.watcher.as_ref() {
                 match self.frames.get(&watcher.frame_id) {
                     Some(frame) => self
@@ -562,6 +631,18 @@ impl FrameManager {
                                     id,
                                     frame: frame_id,
                                 },
+                            )));
+                    }
+                }
+                ScanOutcome::Failed(error_text) => {
+                    for waiter in entry.waiters {
+                        let _ =
+                            waiter.send(Err(FrameWaitError::NavigationFailed(error_text.clone())));
+                    }
+                    if let Some(id) = entry.watcher.and_then(|watcher| watcher.id) {
+                        self.queued_events
+                            .push_back(FrameEvent::NavigationResult(Err(
+                                NavigationError::Failed { id, error_text },
                             )));
                     }
                 }
@@ -1113,12 +1194,78 @@ impl FrameManager {
         event: &EventFrameStoppedLoading,
         session_id: Option<&SessionId>,
     ) {
-        if let Some(frame) = self.frames.get_mut(&event.frame_id) {
-            if session_id
-                .map(|session_id| frame.session_id() == Some(session_id))
-                .unwrap_or(true)
+        let Some(frame) = self.frames.get_mut(&event.frame_id) else {
+            return;
+        };
+        if !session_id
+            .map(|session_id| frame.session_id() == Some(session_id))
+            .unwrap_or(true)
+        {
+            return;
+        }
+        frame.on_loading_stopped();
+        let current_loader = frame.loader_id.clone();
+
+        // The frame stopped loading without committing the document the
+        // browser announced for a navigation: the navigation was aborted
+        // (blocked, cancelled, or turned into a download).
+        let key = (session_id.cloned(), event.frame_id.clone());
+        if let Some(watcher) = self
+            .navigation
+            .get_mut(&key)
+            .and_then(|entry| entry.watcher.as_mut())
+        {
+            if watcher.failure.is_none()
+                && watcher
+                    .expected_loader_id
+                    .as_ref()
+                    .is_some_and(|expected| current_loader.as_ref() != Some(expected))
             {
-                frame.on_loading_stopped();
+                watcher.failure = Some(NAVIGATION_ABORTED.to_owned());
+            }
+        }
+    }
+
+    /// The browser answered a `Page.navigate` with the loader of the document
+    /// it is about to commit. Knowing it lets a failure of that document's
+    /// request, or a stop without commit, end the navigation.
+    pub(crate) fn on_navigation_response(
+        &mut self,
+        navigation_id: NavigationId,
+        loader_id: Option<LoaderId>,
+    ) {
+        if let Some(watcher) = self
+            .navigation
+            .values_mut()
+            .filter_map(|entry| entry.watcher.as_mut())
+            .find(|watcher| watcher.id == Some(navigation_id))
+        {
+            watcher.expected_loader_id = loader_id;
+        }
+    }
+
+    /// `Network.loadingFailed`: when the failed request is the document
+    /// request of a pending navigation (its id is the new document's loader
+    /// id), the navigation fails with the network error.
+    pub(crate) fn on_request_failed(
+        &mut self,
+        session_id: Option<&SessionId>,
+        request_id: &str,
+        error_text: &str,
+    ) {
+        for ((key_session, _), entry) in self.navigation.iter_mut() {
+            if session_id.is_some() && key_session.as_ref() != session_id {
+                continue;
+            }
+            if let Some(watcher) = entry.watcher.as_mut() {
+                if watcher.failure.is_none()
+                    && watcher
+                        .expected_loader_id
+                        .as_ref()
+                        .is_some_and(|expected| expected.as_ref() == request_id)
+                {
+                    watcher.failure = Some(error_text.to_owned());
+                }
             }
         }
     }
@@ -1694,6 +1841,63 @@ impl FrameManager {
         Some(CommandChain::new(cmds, self.request_timeout))
     }
 
+    /// The isolated world cached for a frame's current document, with the
+    /// generation a newly created world must be stored under.
+    #[cfg_attr(not(feature = "stealth"), allow(dead_code))]
+    pub(crate) fn isolated_world_slot(&self, frame_id: &FrameId) -> Option<IsolatedWorldSlot> {
+        let frame = self.frames.get(frame_id)?;
+        Some(IsolatedWorldSlot {
+            frame_id: frame_id.clone(),
+            session_id: frame.session_id().cloned()?,
+            generation: frame.world_generation,
+            context_id: frame.isolated_world,
+        })
+    }
+
+    /// Cache a world created for `frame_id` in `session_id`. Ignored when the
+    /// frame navigated, changed session or went away since `generation` was
+    /// handed out.
+    #[cfg_attr(not(feature = "stealth"), allow(dead_code))]
+    pub(crate) fn store_isolated_world(
+        &mut self,
+        frame_id: &FrameId,
+        session_id: &SessionId,
+        generation: u64,
+        context_id: ExecutionContextId,
+    ) -> bool {
+        match self.frames.get_mut(frame_id) {
+            Some(frame)
+                if frame.session_id() == Some(session_id)
+                    && frame.world_generation == generation =>
+            {
+                frame.isolated_world = Some(context_id);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Drop a cached world the browser no longer knows. Only the given id is
+    /// dropped, so a newer world stored meanwhile survives.
+    #[cfg_attr(not(feature = "stealth"), allow(dead_code))]
+    pub(crate) fn forget_isolated_world(
+        &mut self,
+        frame_id: &FrameId,
+        session_id: &SessionId,
+        context_id: ExecutionContextId,
+    ) -> bool {
+        match self.frames.get_mut(frame_id) {
+            Some(frame)
+                if frame.session_id() == Some(session_id)
+                    && frame.isolated_world == Some(context_id) =>
+            {
+                frame.reset_isolated_world();
+                true
+            }
+            _ => false,
+        }
+    }
+
     pub(crate) fn settle_isolated_world_registration(
         &mut self,
         session_id: &SessionId,
@@ -1777,6 +1981,12 @@ pub enum NavigationError {
         id: NavigationId,
         frame: FrameId,
     },
+    /// The navigation request failed or the frame stopped loading before the
+    /// new document committed.
+    Failed {
+        id: NavigationId,
+        error_text: String,
+    },
 }
 
 impl NavigationError {
@@ -1784,6 +1994,7 @@ impl NavigationError {
         match self {
             NavigationError::Timeout { id, .. } => id,
             NavigationError::FrameNotFound { id, .. } => id,
+            NavigationError::Failed { id, .. } => id,
         }
     }
 }
@@ -1817,6 +2028,11 @@ pub struct NavigationWatcher {
     /// navigating to a new document by checking if a loader was included in the
     /// response.
     same_document_navigation: bool,
+    /// Loader of the document the browser announced in its `Page.navigate`
+    /// response. A failure of the request with this id fails the navigation.
+    expected_loader_id: Option<LoaderId>,
+    /// Set once the navigation is known to have failed.
+    failure: Option<String>,
 }
 
 impl NavigationWatcher {
@@ -1835,6 +2051,8 @@ impl NavigationWatcher {
             loader_id,
             frame_id: frame,
             same_document_navigation: false,
+            expected_loader_id: None,
+            failure: None,
         }
     }
 
@@ -2142,6 +2360,311 @@ mod tests {
         EventExecutionContextDestroyed {
             execution_context_unique_id: unique_id.to_owned(),
         }
+    }
+
+    fn lifecycle(frame_id: &str, loader_id: &str, name: &str) -> EventLifecycleEvent {
+        EventLifecycleEvent {
+            frame_id: FrameId::new(frame_id),
+            loader_id: LoaderId::new(loader_id),
+            name: name.to_owned(),
+            timestamp: chromiumoxide_cdp::cdp::browser_protocol::network::MonotonicTime::new(0.),
+        }
+    }
+
+    /// Start navigation `id` of the main frame and answer its `Page.navigate`
+    /// with the loader of the new document.
+    fn start_main_navigation(
+        manager: &mut FrameManager,
+        main_session: &SessionId,
+        main_frame_id: &FrameId,
+        id: usize,
+        new_loader: &str,
+    ) {
+        manager.navigate_frame_in_session(
+            main_session.clone(),
+            main_frame_id.clone(),
+            navigation_request(id),
+        );
+        assert!(matches!(
+            manager.poll(Instant::now()),
+            Some(FrameEvent::NavigationRequest(_, _))
+        ));
+        manager.on_navigation_response(NavigationId(id), Some(LoaderId::new(new_loader)));
+        manager.on_frame_started_loading_in_session(
+            &EventFrameStartedLoading {
+                frame_id: main_frame_id.clone(),
+            },
+            main_session.clone(),
+        );
+    }
+
+    /// mattsse/chromiumoxide#191: the main frame's `load` completes the
+    /// navigation even when a subframe never finishes loading.
+    #[test]
+    fn main_frame_load_completes_navigation_despite_a_loading_subframe() {
+        let (mut manager, main_session, main_frame_id) = manager_with_main();
+        add_child(&mut manager, "ad-frame", "main-frame", &main_session);
+        start_main_navigation(
+            &mut manager,
+            &main_session,
+            &main_frame_id,
+            31,
+            "new-loader",
+        );
+
+        manager.on_page_lifecycle_event_in_session(
+            &lifecycle("main-frame", "new-loader", "init"),
+            main_session.clone(),
+        );
+        // A late subframe starts loading and never finishes.
+        manager.on_frame_started_loading_in_session(
+            &EventFrameStartedLoading {
+                frame_id: FrameId::new("ad-frame"),
+            },
+            main_session.clone(),
+        );
+        manager.on_page_lifecycle_event_in_session(
+            &lifecycle("ad-frame", "ad-loader-2", "init"),
+            main_session.clone(),
+        );
+        manager.on_page_lifecycle_event_in_session(
+            &lifecycle("main-frame", "new-loader", "load"),
+            main_session.clone(),
+        );
+
+        assert!(matches!(
+            manager.poll(Instant::now()),
+            Some(FrameEvent::NavigationResult(Ok(
+                NavigationOk::NewDocumentNavigation(NavigationId(31))
+            )))
+        ));
+    }
+
+    #[test]
+    fn network_idle_waits_for_loading_subframes() {
+        let (mut manager, main_session, main_frame_id) = manager_with_main();
+        add_child(&mut manager, "child", "main-frame", &main_session);
+        let main = manager.frames.get_mut(&main_frame_id).expect("main frame");
+        main.lifecycle_events.insert("networkIdle".into());
+        let idle = LifecycleEvent::NetworkIdle.as_ref();
+        let main = manager.frame(&main_frame_id).expect("main frame");
+        // The child has lifecycle events but no networkIdle yet.
+        assert!(!manager.frame_reached_lifecycle(main, idle));
+        assert!(manager.frame_reached_lifecycle(main, LifecycleEvent::Load.as_ref()));
+
+        manager
+            .frames
+            .get_mut(&FrameId::new("child"))
+            .expect("child frame")
+            .lifecycle_events
+            .insert("networkIdle".into());
+        let main = manager.frame(&main_frame_id).expect("main frame");
+        assert!(manager.frame_reached_lifecycle(main, idle));
+    }
+
+    /// mattsse/chromiumoxide#125: a navigation whose document request fails
+    /// ends with the network error instead of waiting for a load that never
+    /// comes.
+    #[test]
+    fn failed_document_request_fails_the_navigation() {
+        let (mut manager, main_session, main_frame_id) = manager_with_main();
+        start_main_navigation(
+            &mut manager,
+            &main_session,
+            &main_frame_id,
+            32,
+            "doc-request",
+        );
+        let (tx, rx) = oneshot::channel();
+        manager.wait_for_navigation(main_session.clone(), main_frame_id.clone(), tx);
+
+        // Another request failing does not matter.
+        manager.on_request_failed(Some(&main_session), "image-request", "net::ERR_FAILED");
+        assert!(manager.poll(Instant::now()).is_none());
+
+        manager.on_request_failed(Some(&main_session), "doc-request", "net::ERR_ABORTED");
+        assert!(matches!(
+            manager.poll(Instant::now()),
+            Some(FrameEvent::NavigationResult(Err(NavigationError::Failed {
+                id: NavigationId(32),
+                ref error_text,
+            }))) if error_text == "net::ERR_ABORTED"
+        ));
+        assert_eq!(
+            block_on(rx).expect("waiter is settled"),
+            Err(FrameWaitError::NavigationFailed(
+                "net::ERR_ABORTED".to_owned()
+            ))
+        );
+    }
+
+    #[test]
+    fn stopped_loading_without_commit_aborts_the_navigation() {
+        let (mut manager, main_session, main_frame_id) = manager_with_main();
+        start_main_navigation(
+            &mut manager,
+            &main_session,
+            &main_frame_id,
+            33,
+            "never-commits",
+        );
+
+        manager.on_frame_stopped_loading_in_session(
+            &EventFrameStoppedLoading {
+                frame_id: main_frame_id.clone(),
+            },
+            main_session.clone(),
+        );
+        assert!(matches!(
+            manager.poll(Instant::now()),
+            Some(FrameEvent::NavigationResult(Err(NavigationError::Failed {
+                id: NavigationId(33),
+                ..
+            })))
+        ));
+    }
+
+    #[test]
+    fn stopped_loading_after_commit_completes_the_navigation() {
+        let (mut manager, main_session, main_frame_id) = manager_with_main();
+        start_main_navigation(&mut manager, &main_session, &main_frame_id, 34, "commits");
+        manager.on_page_lifecycle_event_in_session(
+            &lifecycle("main-frame", "commits", "init"),
+            main_session.clone(),
+        );
+        manager.on_frame_stopped_loading_in_session(
+            &EventFrameStoppedLoading {
+                frame_id: main_frame_id.clone(),
+            },
+            main_session.clone(),
+        );
+        assert!(matches!(
+            manager.poll(Instant::now()),
+            Some(FrameEvent::NavigationResult(Ok(
+                NavigationOk::NewDocumentNavigation(NavigationId(34))
+            )))
+        ));
+    }
+
+    /// The isolated world cache never hands out a world for another document
+    /// or session: navigation, detach and session changes drop it, and a
+    /// world created before such a change is not stored.
+    #[test]
+    fn isolated_world_cache_is_invalidated_by_navigation_detach_and_swap() {
+        let (mut manager, main_session, main_frame_id) = manager_with_main();
+
+        let slot = manager
+            .isolated_world_slot(&main_frame_id)
+            .expect("main frame slot");
+        assert_eq!(slot.context_id, None);
+        assert!(manager.store_isolated_world(
+            &main_frame_id,
+            &main_session,
+            slot.generation,
+            ExecutionContextId::new(3),
+        ));
+        assert_eq!(
+            manager
+                .isolated_world_slot(&main_frame_id)
+                .expect("slot")
+                .context_id,
+            Some(ExecutionContextId::new(3))
+        );
+
+        // A same-document navigation keeps the world.
+        manager.on_frame_navigated_within_document_in_session(
+            &EventNavigatedWithinDocument {
+                frame_id: main_frame_id.clone(),
+                url: "https://main-frame.example/#a".to_owned(),
+                navigation_type: NavigatedWithinDocumentNavigationType::Fragment,
+            },
+            main_session.clone(),
+        );
+        assert!(
+            manager
+                .isolated_world_slot(&main_frame_id)
+                .expect("slot")
+                .context_id
+                .is_some()
+        );
+
+        // A new document (possibly in another process, where context ids
+        // restart) drops it; a world created for the old document is ignored.
+        let stale_generation = slot.generation;
+        manager.on_frame_navigated_in_session(
+            &cdp_frame("main-frame", None, "next-loader"),
+            main_session.clone(),
+        );
+        let fresh = manager.isolated_world_slot(&main_frame_id).expect("slot");
+        assert_eq!(fresh.context_id, None);
+        assert!(!manager.store_isolated_world(
+            &main_frame_id,
+            &main_session,
+            stale_generation,
+            ExecutionContextId::new(3),
+        ));
+        assert!(manager.store_isolated_world(
+            &main_frame_id,
+            &main_session,
+            fresh.generation,
+            ExecutionContextId::new(9),
+        ));
+
+        // Forgetting only drops the reported world.
+        assert!(!manager.forget_isolated_world(
+            &main_frame_id,
+            &main_session,
+            ExecutionContextId::new(3)
+        ));
+        assert!(manager.forget_isolated_world(
+            &main_frame_id,
+            &main_session,
+            ExecutionContextId::new(9)
+        ));
+        assert_eq!(
+            manager
+                .isolated_world_slot(&main_frame_id)
+                .expect("slot")
+                .context_id,
+            None
+        );
+
+        // A subframe moving to its own (out-of-process) session drops its
+        // world, and a store for the old session is refused.
+        let child_session = session("child");
+        add_child(&mut manager, "child-frame", "main-frame", &main_session);
+        let child_frame_id = FrameId::new("child-frame");
+        let child = manager
+            .isolated_world_slot(&child_frame_id)
+            .expect("child slot");
+        assert!(manager.store_isolated_world(
+            &child_frame_id,
+            &main_session,
+            child.generation,
+            ExecutionContextId::new(4),
+        ));
+        manager.on_attached_to_target_in_session(
+            &attached_event("child-frame", "main-frame", &child_session),
+            child_session.clone(),
+        );
+        let swapped = manager
+            .isolated_world_slot(&child_frame_id)
+            .expect("child slot");
+        assert_eq!(swapped.session_id, child_session);
+        assert_eq!(swapped.context_id, None);
+        assert!(!manager.store_isolated_world(
+            &child_frame_id,
+            &main_session,
+            swapped.generation,
+            ExecutionContextId::new(5),
+        ));
+
+        // A detached frame has no slot at all.
+        manager.on_frame_detached(&EventFrameDetached {
+            frame_id: child_frame_id.clone(),
+            reason: FrameDetachedReason::Remove,
+        });
+        assert!(manager.isolated_world_slot(&child_frame_id).is_none());
     }
 
     #[test]

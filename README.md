@@ -147,6 +147,39 @@ retry succeeds, a newly attached OOPIF can briefly inherit the requested interce
 state even though the main session did not confirm it; the failed caller has already received
 `Err`, so applications should treat the configuration as unavailable during that window.
 
+## Stealth
+
+With the `stealth` cargo feature chromiumoxide leaves no Chrome DevTools Protocol traces that
+page scripts can observe, in the manner of [Patchright](https://github.com/Kaliiiiiiiiii-Vinyzu/patchright):
+
+```toml
+chromiumoxide = { version = "0.9", features = ["stealth"] }
+```
+
+- `Runtime.enable`, `Log.enable` and `Performance.enable` are never sent, and no utility world
+  or init script is registered when a target is attached. Paused child targets are still resumed
+  with `Runtime.runIfWaitingForDebugger`.
+- `Page::evaluate`, `Page::evaluate_expression`, `Page::evaluate_function`, `Frame::eval`,
+  `Frame::query_selector` and all `Element` APIs run in an isolated world created on demand per
+  frame with `Page.createIsolatedWorld` (random name, universal access). The world is cached per
+  frame document and dropped when the frame navigates to a new document, detaches or moves to
+  another session; out-of-process iframes get theirs through their own session. Elements are
+  resolved into that world, so page scripts never see calls made by chromiumoxide (the world
+  shares the DOM with the page but not its JavaScript globals).
+- `Page::evaluate_main_world` and `Frame::evaluate_main_world` run code in the page's main world
+  when its globals are needed (`Runtime.evaluate` of `globalThis` without a context id, then
+  `Runtime.callFunctionOn` on that object). Page scripts can observe what that code does.
+- `Page::expose_function` returns `CdpError::NotAllowed`: `Runtime.addBinding` adds a global the
+  page can find.
+- `Page::execution_context` and the related getters return the isolated world's context.
+- Calling `Page::enable_runtime`, `Page::enable_log` or sending `Runtime.enable` yourself undoes
+  the feature, and `Page::metrics` needs `Performance.enable`.
+
+`stealth` only changes how chromiumoxide talks to the browser. It does **not** change the
+browser's fingerprint. `Page::enable_stealth_mode` and `Page::enable_stealth_mode_with_agent` are
+not part of the feature: they inject scripts that override `navigator` properties, WebGL values
+and the user agent, which changes the fingerprint and can itself be detected.
+
 ## Compatibility and current limitations
 
 The frame/OOPIF API has two intentional source-compatibility exceptions:

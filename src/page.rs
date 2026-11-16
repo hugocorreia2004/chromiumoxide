@@ -33,12 +33,12 @@ use chromiumoxide_types::*;
 
 use crate::auth::Credentials;
 use crate::element::Element;
-use crate::error::{CdpError, Result};
+use crate::error::{CdpError, Result, TargetChannelResult};
 use crate::frame::Frame;
 use crate::handler::PageInner;
 use crate::handler::commandfuture::CommandFuture;
 use crate::handler::domworld::DOMWorldKind;
-use crate::handler::frame::HTTP_RESPONSE_CODE_FAILURE;
+use crate::handler::frame::{HTTP_RESPONSE_CODE_FAILURE, LifecycleEvent};
 use crate::handler::httpfuture::HttpFuture;
 use crate::handler::target::{GetName, GetParent, GetUrl, InternalTargetMessage, TargetMessage};
 use crate::js::{Evaluation, EvaluationResult};
@@ -284,6 +284,13 @@ impl Page {
     /// Changes your user_agent, removes the `navigator.webdriver` property
     /// changes permissions, pluggins rendering contexts and the `window.chrome`
     /// property to make it harder to detect the scraper as a bot
+    ///
+    /// **Not part of the `stealth` cargo feature.** This injects scripts that
+    /// override `navigator` properties and WebGL values, and sets a fixed user
+    /// agent: it changes the browser's fingerprint, and the overrides
+    /// themselves can be detected. The `stealth` feature instead changes only
+    /// how this crate talks to the browser, so that the page cannot see the
+    /// automation; it does not touch the fingerprint.
     pub async fn enable_stealth_mode(&self) -> Result<()> {
         self._enable_stealth_mode().await?;
         self.set_user_agent("Mozilla/5.0 (Windows NT 11.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/107.0.5296.0 Safari/537.36").await?;
@@ -294,6 +301,10 @@ impl Page {
     /// Changes your user_agent with a custom agent, removes the `navigator.webdriver` property
     /// changes permissions, pluggins rendering contexts and the `window.chrome`
     /// property to make it harder to detect the scraper as a bot
+    ///
+    /// **Not part of the `stealth` cargo feature**: like
+    /// [`Page::enable_stealth_mode`] it changes the fingerprint with injected
+    /// overrides.
     pub async fn enable_stealth_mode_with_agent(&self, ua: &str) -> Result<()> {
         self._enable_stealth_mode().await?;
         if !ua.is_empty() {
@@ -555,7 +566,8 @@ impl Page {
                 request: subscription,
                 tx: ack_tx,
             })
-            .await?;
+            .await
+            .or_target_closed()?;
         ack_rx.await??;
 
         Ok(())
@@ -579,17 +591,31 @@ impl Page {
                 commands: self.inner.sender().clone(),
                 tx,
             })
-            .await?;
+            .await
+            .or_target_closed()?;
         rx.await??;
 
         Ok(PausedRequestStream { inner })
     }
 
+    /// Exposes `function` to the page as `window[name]`, backed by a CDP
+    /// binding.
+    ///
+    /// Not available with the `stealth` feature: `Runtime.addBinding` adds a
+    /// global the page can find, so the call fails with
+    /// [`CdpError::NotAllowed`].
     pub async fn expose_function(
         &self,
         name: impl Into<String>,
         function: impl AsRef<str>,
     ) -> Result<()> {
+        if cfg!(feature = "stealth") {
+            return Err(CdpError::NotAllowed(
+                "Page::expose_function is not available with the `stealth` feature: \
+                 Runtime.addBinding is visible to page scripts"
+                    .to_owned(),
+            ));
+        }
         let name = name.into();
         let expression = utils::evaluation_string(function, &["exposedFun", name.as_str()]);
 
@@ -617,6 +643,33 @@ impl Page {
     /// Same as `wait_for_navigation_response` but returns `Self` instead
     pub async fn wait_for_navigation(&self) -> Result<&Self> {
         self.inner.wait_for_navigation().await?;
+        Ok(self)
+    }
+
+    /// Like [`Page::wait_for_navigation`], but resolves once the main frame
+    /// fired the given lifecycle event for its current document instead of
+    /// `load`.
+    ///
+    /// [`LifecycleEvent::NetworkIdle`] waits until the main frame, and every
+    /// subframe that started loading, had no network activity for 500 ms
+    /// (Chrome's `networkIdle` lifecycle event, the equivalent of
+    /// Puppeteer's `networkidle0`). Fails with [`CdpError::Timeout`] after the
+    /// configured request timeout.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use chromiumoxide::page::Page;
+    /// # use chromiumoxide::error::Result;
+    /// # use chromiumoxide::handler::frame::LifecycleEvent;
+    /// # async fn demo(page: Page) -> Result<()> {
+    ///     page.goto("https://example.com").await?;
+    ///     page.wait_for_navigation_until(LifecycleEvent::NetworkIdle).await?;
+    ///     # Ok(())
+    /// # }
+    /// ```
+    pub async fn wait_for_navigation_until(&self, event: LifecycleEvent) -> Result<&Self> {
+        self.inner.wait_for_lifecycle(event).await?;
         Ok(self)
     }
 
@@ -659,7 +712,8 @@ impl Page {
                 frame_id: Some(frame_id),
                 tx,
             }))
-            .await?;
+            .await
+            .or_target_closed()?;
         Ok(rx.await?)
     }
 
@@ -674,7 +728,8 @@ impl Page {
             .internal_sender()
             .clone()
             .send(InternalTargetMessage::SetCredentials { credentials, tx })
-            .await?;
+            .await
+            .or_target_closed()?;
         rx.await??;
 
         Ok(())
@@ -696,7 +751,8 @@ impl Page {
             .internal_sender()
             .clone()
             .send(InternalTargetMessage::SetRequestInterception { enabled, tx })
-            .await?;
+            .await
+            .or_target_closed()?;
         rx.await??;
 
         Ok(())
@@ -709,7 +765,8 @@ impl Page {
             .sender()
             .clone()
             .send(TargetMessage::Url(GetUrl::new(tx)))
-            .await?;
+            .await
+            .or_target_closed()?;
         Ok(rx.await?)
     }
 
@@ -723,7 +780,8 @@ impl Page {
                 frame_id: Some(frame_id),
                 tx,
             }))
-            .await?;
+            .await
+            .or_target_closed()?;
         Ok(rx.await?)
     }
 
@@ -734,7 +792,8 @@ impl Page {
             .sender()
             .clone()
             .send(TargetMessage::Parent(GetParent { frame_id, tx }))
-            .await?;
+            .await
+            .or_target_closed()?;
         Ok(rx.await?)
     }
 
@@ -745,7 +804,8 @@ impl Page {
             .sender()
             .clone()
             .send(TargetMessage::MainFrame(tx))
-            .await?;
+            .await
+            .or_target_closed()?;
         Ok(rx.await?)
     }
 
@@ -756,7 +816,8 @@ impl Page {
             .sender()
             .clone()
             .send(TargetMessage::AllFrames(tx))
-            .await?;
+            .await
+            .or_target_closed()?;
         Ok(rx.await?)
     }
 
@@ -900,9 +961,14 @@ impl Page {
 
     /// Tries to close page, running its beforeunload hooks, if any.
     /// Calls Page.close with [`CloseParams`]
+    ///
+    /// Resolves once the target is gone. From then on, every operation on a
+    /// clone of this page, its frames or its elements fails with
+    /// [`CdpError::TargetClosed`] without reaching the browser, pending
+    /// waiters fail the same way, and its event streams end.
     pub async fn close(self) -> Result<()> {
         self.execute(CloseParams::default()).await?;
-        Ok(())
+        self.inner.wait_for_close().await
     }
 
     /// Performs a single mouse click event at the point's location.
@@ -1500,12 +1566,22 @@ impl Page {
     ///     # Ok(())
     /// # }
     /// ```
+    ///
+    /// With the `stealth` feature the evaluation runs in an isolated world of
+    /// the main frame (it shares the DOM with the page but not its globals);
+    /// use [`Page::evaluate_main_world`] for code that needs the page's own
+    /// JavaScript objects.
     pub async fn evaluate(&self, evaluate: impl Into<Evaluation>) -> Result<EvaluationResult> {
         match evaluate.into() {
             Evaluation::Expression(mut expr) => {
+                // Under `stealth` the isolated world is chosen (and retried)
+                // by `evaluate_expression`.
+                #[cfg(not(feature = "stealth"))]
                 if expr.context_id.is_none() {
                     expr.context_id = self.execution_context().await?;
                 }
+                #[cfg(feature = "stealth")]
+                let _ = &mut expr;
                 let fallback = expr
                     .eval_as_function_fallback
                     .and_then(|p| if p { Some(expr.clone()) } else { None });
@@ -1582,8 +1658,40 @@ impl Page {
         self.inner.evaluate_function(evaluate).await
     }
 
+    /// Evaluates an expression or function in the main world of the page's
+    /// main frame, where the page's own scripts and globals live.
+    ///
+    /// The main world is reached without `Runtime.enable`: an expression is
+    /// evaluated with `Runtime.evaluate` and no context id, and a function is
+    /// called with `Runtime.callFunctionOn` on the main world's `globalThis`
+    /// (`this` inside the function). Page scripts can observe what the code
+    /// does there (e.g. calls to functions they patched), so prefer
+    /// [`Page::evaluate`] unless the page's globals are needed.
+    ///
+    /// # Example
+    /// ```no_run
+    /// # use chromiumoxide::page::Page;
+    /// # use chromiumoxide::error::Result;
+    /// # async fn demo(page: Page) -> Result<()> {
+    ///     let app_version: String = page
+    ///         .evaluate_main_world("window.APP_VERSION")
+    ///         .await?
+    ///         .into_value()?;
+    ///     # Ok(())
+    /// # }
+    /// ```
+    pub async fn evaluate_main_world(
+        &self,
+        evaluation: impl Into<Evaluation>,
+    ) -> Result<EvaluationResult> {
+        self.inner.evaluate_main_world(evaluation.into()).await
+    }
+
     /// Returns the default execution context identifier of this page that
     /// represents the context for JavaScript execution.
+    ///
+    /// With the `stealth` feature this is the main frame's isolated world
+    /// (created on demand), never a main-world context.
     pub async fn execution_context(&self) -> Result<Option<ExecutionContextId>> {
         self.inner.execution_context().await
     }
@@ -1653,7 +1761,8 @@ impl Page {
                 params: script.into(),
                 tx,
             })
-            .await?;
+            .await
+            .or_target_closed()?;
         rx.await?
     }
 
@@ -1785,6 +1894,10 @@ pub struct ScreenshotParams {
     pub full_page: Option<bool>,
     /// Make the background transparent (png only).
     pub omit_background: Option<bool>,
+    /// Bring the page to the front (`Target.activateTarget`) before the
+    /// capture. Off by default: activation steals the window focus of a
+    /// headful browser, and the capture works without it.
+    pub activate: Option<bool>,
 }
 
 impl ScreenshotParams {
@@ -1794,6 +1907,10 @@ impl ScreenshotParams {
 
     pub(crate) fn full_page(&self) -> bool {
         self.full_page.unwrap_or(false)
+    }
+
+    pub(crate) fn activate(&self) -> bool {
+        self.activate.unwrap_or(false)
     }
 
     pub(crate) fn omit_background(&self) -> bool {
@@ -1812,6 +1929,7 @@ pub struct ScreenshotParamsBuilder {
     cdp_params: CaptureScreenshotParams,
     full_page: Option<bool>,
     omit_background: Option<bool>,
+    activate: Option<bool>,
 }
 
 impl ScreenshotParamsBuilder {
@@ -1857,11 +1975,21 @@ impl ScreenshotParamsBuilder {
         self
     }
 
+    /// Bring the page to the front before the capture (defaults to false).
+    ///
+    /// Activation focuses the browser window, so a headful browser steals the
+    /// focus on every capture when this is on.
+    pub fn activate(mut self, activate: impl Into<bool>) -> Self {
+        self.activate = Some(activate.into());
+        self
+    }
+
     pub fn build(self) -> ScreenshotParams {
         ScreenshotParams {
             cdp_params: self.cdp_params,
             full_page: self.full_page,
             omit_background: self.omit_background,
+            activate: self.activate,
         }
     }
 }

@@ -14,11 +14,14 @@ use chromiumoxide_types::{Command, CommandResponse, Method, Request};
 
 use crate::cmd::{CommandMessage, to_command_response};
 use crate::element::{Element, remote_object_ids_for_exception};
-use crate::error::{CdpError, Result};
+use crate::error::{CdpError, Result, TargetChannelResult};
 use crate::handler::PageInner;
+#[cfg(not(feature = "stealth"))]
 use crate::handler::domworld::DOMWorldKind;
 use crate::handler::frame::FrameWaitError;
-use crate::handler::target::{ExecutionContextInfo, FrameInfo, InternalTargetMessage};
+#[cfg(not(feature = "stealth"))]
+use crate::handler::target::ExecutionContextInfo;
+use crate::handler::target::{FrameInfo, InternalTargetMessage};
 use crate::js::{Evaluation, EvaluationResult};
 
 /// A frame handle pinned to the CDP session that owned the frame when the
@@ -153,7 +156,8 @@ impl Frame {
                 expected_session_id: self.inner.session_id.clone(),
                 command,
             })
-            .await?;
+            .await
+            .or_target_closed()?;
         let response = rx.await??;
         to_command_response::<T>(response, method)
     }
@@ -166,20 +170,55 @@ impl Frame {
         }
     }
 
+    /// Evaluate JavaScript in the main world of this frame, where the page's
+    /// own scripts and globals live, without `Runtime.enable`. See
+    /// [`crate::Page::evaluate_main_world`].
+    pub async fn evaluate_main_world(
+        &self,
+        evaluation: impl Into<Evaluation>,
+    ) -> Result<EvaluationResult> {
+        // The root frame of a session (the page's main frame or an
+        // out-of-process iframe) is the session's default target; any other
+        // frame is reached through its owner element.
+        let session_root = match self.parent_id() {
+            None => true,
+            Some(parent_id) => self
+                .inner
+                .tab
+                .frame_info(parent_id.clone())
+                .await?
+                .is_none_or(|parent| parent.session_id != self.inner.session_id),
+        };
+        crate::worlds::evaluate_main_world(
+            &self.inner.tab,
+            &self.inner.frame_id,
+            &self.inner.session_id,
+            session_root,
+            evaluation.into(),
+        )
+        .await
+    }
+
     /// Query the first element in this frame's pinned main execution context.
     ///
     /// The returned Element keeps the remote object in this Frame handle's
-    /// captured session and has no document-scoped `NodeId`.
+    /// captured session and has no document-scoped `NodeId`. With the
+    /// `stealth` feature the query runs in the frame's isolated world.
     pub async fn query_selector(&self, selector: &str) -> Result<Option<Element>> {
-        let context = self.pinned_execution_context().await?;
         let params = CallFunctionOnParams::builder()
             .function_declaration("function(sel) { return document.querySelector(sel); }")
             .argument(CallArgument::builder().value(selector).build())
             .return_by_value(false)
-            .execution_context_id(context.context_id)
             .build()
             .map_err(CdpError::msg)?;
-        let response = self.execute(params).await?.result;
+        let response = self
+            .in_context(|context_id| {
+                let mut params = params.clone();
+                params.execution_context_id = Some(context_id);
+                async move { self.execute(params).await }
+            })
+            .await?
+            .result;
 
         if let Some(exception) = response.exception_details {
             let cleanup = remote_object_ids_for_exception(&response.result, &exception);
@@ -243,7 +282,8 @@ impl Frame {
                 req: request,
                 tx,
             })
-            .await?;
+            .await
+            .or_target_closed()?;
         let response = rx.await??;
         Ok(to_command_response::<NavigateParams>(response, method)?.result)
     }
@@ -260,7 +300,8 @@ impl Frame {
                 session_id: self.inner.session_id.clone(),
                 tx,
             })
-            .await?;
+            .await
+            .or_target_closed()?;
         match rx.await? {
             Ok(()) => Ok(()),
             Err(FrameWaitError::Timeout) => Err(CdpError::Timeout),
@@ -290,6 +331,33 @@ impl Frame {
         self.inner.tab.frame_by_id(parent_id).await
     }
 
+    /// Run `operation` with the execution context this handle evaluates in:
+    /// the frame's main world context, or with the `stealth` feature its
+    /// isolated world (retried once the world turns out to be gone).
+    async fn in_context<T, F, Fut>(&self, mut operation: F) -> Result<T>
+    where
+        F: FnMut(ExecutionContextId) -> Fut,
+        Fut: std::future::Future<Output = Result<T>>,
+    {
+        #[cfg(feature = "stealth")]
+        {
+            self.inner
+                .tab
+                .in_isolated_world(
+                    Some(self.inner.frame_id.clone()),
+                    Some(self.inner.session_id.clone()),
+                    |world| operation(world.context_id),
+                )
+                .await
+        }
+        #[cfg(not(feature = "stealth"))]
+        {
+            let context_id = self.pinned_context_id().await?;
+            operation(context_id).await
+        }
+    }
+
+    #[cfg(not(feature = "stealth"))]
     async fn pinned_execution_context(&self) -> Result<ExecutionContextInfo> {
         let (tx, rx) = oneshot_channel();
         self.inner
@@ -302,7 +370,8 @@ impl Frame {
                 expected_session_id: self.inner.session_id.clone(),
                 tx,
             })
-            .await?;
+            .await
+            .or_target_closed()?;
         let context = rx.await??.ok_or(CdpError::FrameNotReady)?;
         if context.session_id != self.inner.session_id {
             return Err(CdpError::FrameNotReady);
@@ -314,8 +383,6 @@ impl Frame {
         &self,
         mut expression: EvaluateParams,
     ) -> Result<EvaluationResult> {
-        let context_id = self.pinned_context_id().await?;
-        expression.context_id = Some(context_id);
         if expression.await_promise.is_none() {
             expression.await_promise = Some(true);
         }
@@ -326,7 +393,14 @@ impl Frame {
             .eval_as_function_fallback
             .is_some_and(|enabled| enabled)
             .then(|| expression.clone());
-        let response = self.execute(expression).await?.result;
+        let response = self
+            .in_context(|context_id| {
+                let mut expression = expression.clone();
+                expression.context_id = Some(context_id);
+                async move { self.execute(expression).await }
+            })
+            .await?
+            .result;
         if let Some(exception) = response.exception_details {
             return Err(CdpError::JavascriptException(Box::new(exception)));
         }
@@ -343,21 +417,27 @@ impl Frame {
         &self,
         mut function: CallFunctionOnParams,
     ) -> Result<EvaluationResult> {
-        let context_id = self.pinned_context_id().await?;
-        function.execution_context_id = Some(context_id);
         if function.await_promise.is_none() {
             function.await_promise = Some(true);
         }
         if function.return_by_value.is_none() {
             function.return_by_value = Some(true);
         }
-        let response = self.execute(function).await?.result;
+        let response = self
+            .in_context(|context_id| {
+                let mut function = function.clone();
+                function.execution_context_id = Some(context_id);
+                async move { self.execute(function).await }
+            })
+            .await?
+            .result;
         if let Some(exception) = response.exception_details {
             return Err(CdpError::JavascriptException(Box::new(exception)));
         }
         Ok(EvaluationResult::new(response.result))
     }
 
+    #[cfg(not(feature = "stealth"))]
     async fn pinned_context_id(&self) -> Result<ExecutionContextId> {
         Ok(self.pinned_execution_context().await?.context_id)
     }
@@ -419,6 +499,33 @@ mod tests {
         }
     }
 
+    /// With `stealth` the frame asks for its cached isolated world instead.
+    #[cfg(feature = "stealth")]
+    async fn answer_pinned_context(page_handle: &mut PageHandle) {
+        let InternalTargetMessage::GetIsolatedWorld {
+            frame_id,
+            expected_session_id,
+            tx,
+        } = page_handle
+            .internal_rx
+            .next()
+            .await
+            .expect("isolated world query is sent")
+        else {
+            panic!("expected isolated world query")
+        };
+        assert_eq!(frame_id, Some(FrameId::new("child-frame")));
+        assert_eq!(expected_session_id, Some(SessionId::new("child")));
+        tx.send(Ok(crate::handler::frame::IsolatedWorldSlot {
+            frame_id: FrameId::new("child-frame"),
+            session_id: SessionId::new("child"),
+            generation: 0,
+            context_id: Some(ExecutionContextId::new(42)),
+        }))
+        .expect("isolated world receiver remains live");
+    }
+
+    #[cfg(not(feature = "stealth"))]
     async fn answer_pinned_context(page_handle: &mut PageHandle) {
         let InternalTargetMessage::GetPinnedExecutionContext {
             frame_id,

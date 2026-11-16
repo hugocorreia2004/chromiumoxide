@@ -1,5 +1,6 @@
 use std::future::Future;
 use std::io;
+use std::time::Duration;
 
 use futures::SinkExt;
 use futures::channel::mpsc::{Sender, channel, unbounded};
@@ -48,6 +49,10 @@ pub struct Browser {
     debug_ws_url: String,
     /// The context of the browser
     browser_context: BrowserContext,
+    /// Upper bound for a browser-level request. A request whose response
+    /// never arrives (for example because the [`Handler`] is not being
+    /// polled) fails with [`CdpError::Timeout`] instead of hanging.
+    request_timeout: Duration,
 }
 
 /// Browser connection information.
@@ -130,6 +135,7 @@ impl Browser {
 
         let (tx, rx) = channel(1);
 
+        let request_timeout = config.request_timeout;
         let fut = Handler::new(conn, rx, config);
         let browser_context = fut.default_browser_context().clone();
 
@@ -139,6 +145,7 @@ impl Browser {
             child: None,
             debug_ws_url,
             browser_context,
+            request_timeout,
         };
         Ok((browser, fut))
     }
@@ -208,12 +215,14 @@ impl Browser {
         let fut = Handler::new(conn, rx, handler_config);
         let browser_context = fut.default_browser_context().clone();
 
+        let request_timeout = config.request_timeout;
         let browser = Self {
             sender: tx,
             config: Some(config),
             child: Some(child),
             debug_ws_url,
             browser_context,
+            request_timeout,
         };
 
         Ok((browser, fut))
@@ -247,13 +256,26 @@ impl Browser {
     /// [`Browser::drop`] waits automatically if needed.
     pub async fn close(&mut self) -> Result<CloseReturns> {
         let (tx, rx) = oneshot_channel();
+        let mut sender = self.sender.clone();
+        self.with_timeout(async move {
+            sender.send(HandlerMessage::CloseBrowser(tx)).await?;
+            rx.await?
+        })
+        .await
+    }
 
-        self.sender
-            .clone()
-            .send(HandlerMessage::CloseBrowser(tx))
-            .await?;
-
-        rx.await?
+    /// Bound a browser-level request by the configured request timeout.
+    ///
+    /// The [`Handler`] settles requests it has submitted on its own, but a
+    /// request it never sees (because the handler is not polled) would
+    /// otherwise wait forever.
+    async fn with_timeout<T>(&self, request: impl Future<Output = Result<T>>) -> Result<T> {
+        let request = std::pin::pin!(request);
+        let delay = futures_timer::Delay::new(self.request_timeout);
+        match futures::future::select(request, delay).await {
+            futures::future::Either::Left((result, _)) => result,
+            futures::future::Either::Right(_) => Err(CdpError::Timeout),
+        }
     }
 
     /// Asynchronously wait for the spawned chromium instance to exit completely.
@@ -407,16 +429,22 @@ impl Browser {
     }
 
     /// Call a browser method.
+    ///
+    /// The request fails with [`CdpError::Timeout`] if no response arrives
+    /// within the configured request timeout, for example because the
+    /// [`Handler`] is not being polled.
     pub async fn execute<T: Command>(&self, cmd: T) -> Result<CommandResponse<T::Response>> {
         let (tx, rx) = oneshot_channel();
         let method = cmd.identifier();
         let msg = CommandMessage::new(cmd, tx)?;
+        let mut sender = self.sender.clone();
 
-        self.sender
-            .clone()
-            .send(HandlerMessage::Command(msg))
+        let resp = self
+            .with_timeout(async move {
+                sender.send(HandlerMessage::Command(msg)).await?;
+                rx.await?
+            })
             .await?;
-        let resp = rx.await??;
         to_command_response::<T>(resp, method)
     }
 
@@ -446,11 +474,12 @@ impl Browser {
     /// Return all of the pages of the browser
     pub async fn pages(&self) -> Result<Vec<Page>> {
         let (tx, rx) = oneshot_channel();
-        self.sender
-            .clone()
-            .send(HandlerMessage::GetPages(tx))
-            .await?;
-        Ok(rx.await?)
+        let mut sender = self.sender.clone();
+        self.with_timeout(async move {
+            sender.send(HandlerMessage::GetPages(tx)).await?;
+            Ok(rx.await?)
+        })
+        .await
     }
 
     /// Return page of given target_id
@@ -496,22 +525,27 @@ impl Browser {
         Ok(())
     }
 
-    /// Clears cookies.
+    /// Clears the cookies of this browser's context.
     pub async fn clear_cookies(&self) -> Result<()> {
-        self.execute(ClearCookiesParams::default()).await?;
+        self.execute(ClearCookiesParams {
+            browser_context_id: self.browser_context.id().cloned(),
+        })
+        .await?;
         Ok(())
     }
 
-    /// Returns all browser cookies.
+    /// Returns all cookies of this browser's context.
     pub async fn get_cookies(&self) -> Result<Vec<Cookie>> {
         Ok(self
-            .execute(GetCookiesParams::default())
+            .execute(GetCookiesParams {
+                browser_context_id: self.browser_context.id().cloned(),
+            })
             .await?
             .result
             .cookies)
     }
 
-    /// Sets given cookies.
+    /// Sets given cookies in this browser's context. An empty list is a no-op.
     pub async fn set_cookies(&self, mut cookies: Vec<CookieParam>) -> Result<&Self> {
         for cookie in &mut cookies {
             if let Some(url) = cookie.url.as_ref() {
@@ -519,7 +553,9 @@ impl Browser {
             }
         }
 
-        self.execute(SetCookiesParams::new(cookies)).await?;
+        let mut params = SetCookiesParams::new(cookies);
+        params.browser_context_id = self.browser_context.id().cloned();
+        self.execute(params).await?;
         Ok(self)
     }
 }
@@ -600,5 +636,38 @@ async fn ws_url_from_output(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Instant;
+
+    use super::*;
+
+    /// mattsse/chromiumoxide#293: a browser request whose handler never
+    /// answers fails with a timeout instead of hanging forever.
+    #[tokio::test]
+    async fn browser_request_without_a_polled_handler_times_out() {
+        let (tx, _rx) = channel(1);
+        let browser = Browser {
+            sender: tx,
+            config: None,
+            child: None,
+            debug_ws_url: String::new(),
+            browser_context: BrowserContext::default(),
+            request_timeout: Duration::from_millis(50),
+        };
+
+        let started = Instant::now();
+        assert!(matches!(
+            browser.clear_cookies().await,
+            Err(CdpError::Timeout)
+        ));
+        assert!(matches!(
+            browser.set_cookies(Vec::new()).await,
+            Err(CdpError::Timeout)
+        ));
+        assert!(started.elapsed() < Duration::from_secs(5));
     }
 }

@@ -17,10 +17,6 @@ impl Builder {
         }
     }
 
-    pub fn has_mandatory_types(&self) -> bool {
-        self.mandatory().any(|f| !f.optional)
-    }
-
     fn mandatory(&self) -> impl Iterator<Item = &FieldDefinition> + '_ {
         self.fields
             .iter()
