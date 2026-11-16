@@ -353,15 +353,6 @@ impl Page {
     }
 }
 
-macro_rules! method_builder {
-    ($(#[$m:meta])* $name:ident, $method:literal, $api:literal) => {
-        $(#[$m])*
-        pub fn $name(&self, url: impl Into<String>) -> Fetch {
-            Fetch::new(self.clone(), url.into(), Some($method), $api)
-        }
-    };
-}
-
 impl APIRequestContext {
     fn new(kind: Kind) -> Self {
         Self {
@@ -543,30 +534,65 @@ impl APIRequestContext {
         }
     }
 
-    method_builder!(
-        /// A `GET` request.
-        get, "GET", "apiRequestContext.get"
-    );
-    method_builder!(
-        /// A `POST` request.
-        post, "POST", "apiRequestContext.post"
-    );
-    method_builder!(
-        /// A `PUT` request.
-        put, "PUT", "apiRequestContext.put"
-    );
-    method_builder!(
-        /// A `PATCH` request.
-        patch, "PATCH", "apiRequestContext.patch"
-    );
-    method_builder!(
-        /// A `DELETE` request.
-        delete, "DELETE", "apiRequestContext.delete"
-    );
-    method_builder!(
-        /// A `HEAD` request.
-        head, "HEAD", "apiRequestContext.head"
-    );
+    /// A `GET` request.
+    pub fn get(&self, url: impl Into<String>) -> Fetch {
+        Fetch::new(
+            self.clone(),
+            url.into(),
+            Some("GET"),
+            "apiRequestContext.get",
+        )
+    }
+
+    /// A `POST` request.
+    pub fn post(&self, url: impl Into<String>) -> Fetch {
+        Fetch::new(
+            self.clone(),
+            url.into(),
+            Some("POST"),
+            "apiRequestContext.post",
+        )
+    }
+
+    /// A `PUT` request.
+    pub fn put(&self, url: impl Into<String>) -> Fetch {
+        Fetch::new(
+            self.clone(),
+            url.into(),
+            Some("PUT"),
+            "apiRequestContext.put",
+        )
+    }
+
+    /// A `PATCH` request.
+    pub fn patch(&self, url: impl Into<String>) -> Fetch {
+        Fetch::new(
+            self.clone(),
+            url.into(),
+            Some("PATCH"),
+            "apiRequestContext.patch",
+        )
+    }
+
+    /// A `DELETE` request.
+    pub fn delete(&self, url: impl Into<String>) -> Fetch {
+        Fetch::new(
+            self.clone(),
+            url.into(),
+            Some("DELETE"),
+            "apiRequestContext.delete",
+        )
+    }
+
+    /// A `HEAD` request.
+    pub fn head(&self, url: impl Into<String>) -> Fetch {
+        Fetch::new(
+            self.clone(),
+            url.into(),
+            Some("HEAD"),
+            "apiRequestContext.head",
+        )
+    }
 
     /// A request (`GET` unless [`Fetch::method`] says otherwise).
     pub fn fetch(&self, url: impl Into<String>) -> Fetch {
