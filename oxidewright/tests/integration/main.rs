@@ -30,3 +30,5 @@ mod screenshot;
 mod selectors;
 mod smoke;
 mod storage_state;
+mod tracing;
+mod video;
