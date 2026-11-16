@@ -759,15 +759,25 @@ impl HarRecorder {
                 }
             }
         }
-        let tasks = {
-            let mut state = self.state.lock().unwrap();
-            if state.flushed {
-                return Ok(());
+        // Wait for every pending body/header fetch, including the ones
+        // spawned by events that arrive while we wait (the recorder keeps
+        // receiving events until it is flushed), like Playwright's
+        // `HarTracer.flush()` awaiting all its barrier promises.
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let tasks = {
+                let mut state = self.state.lock().unwrap();
+                if state.flushed {
+                    return Ok(());
+                }
+                std::mem::take(&mut state.tasks)
+            };
+            if tasks.is_empty() {
+                break;
             }
-            std::mem::take(&mut state.tasks)
-        };
-        for task in tasks {
-            let _ = tokio::time::timeout(std::time::Duration::from_secs(10), task).await;
+            for task in tasks {
+                let _ = tokio::time::timeout_at(deadline, task).await;
+            }
         }
         let (entries, pages) = {
             let mut state = self.state.lock().unwrap();
@@ -813,12 +823,35 @@ impl HarRecorder {
 
 /// Flush the HAR recorders of a closing context.
 pub(crate) async fn flush_context(context: &BrowserContext) -> Result<()> {
-    let recorders: Vec<Arc<HarRecorder>> =
-        std::mem::take(&mut *context.inner.ext.har_recorders.lock().unwrap());
-    for recorder in recorders {
-        recorder.flush().await?;
+    // Network events are applied by each page's event pump, which can lag
+    // behind the caller (an `evaluate` result or a `load` lifecycle can be
+    // seen before the `requestWillBeSent`/`responseReceived` events received
+    // earlier on the same connection are handled). Drain them first so the
+    // recorders see everything Chrome reported before `close()`.
+    let pages: Vec<Page> = context.inner.pages.lock().unwrap().clone();
+    for page in &pages {
+        page.inner.sync();
     }
-    Ok(())
+    // The recorders stay attached while flushing so that late events
+    // (`requestfinished` of in-flight requests) are still recorded; they are
+    // detached only once written.
+    let recorders: Vec<Arc<HarRecorder>> = context.inner.ext.har_recorders.lock().unwrap().clone();
+    let mut result = Ok(());
+    for recorder in &recorders {
+        if let Err(err) = recorder.flush().await {
+            if result.is_ok() {
+                result = Err(err);
+            }
+        }
+    }
+    context
+        .inner
+        .ext
+        .har_recorders
+        .lock()
+        .unwrap()
+        .retain(|r| !recorders.iter().any(|f| Arc::ptr_eq(f, r)));
+    result
 }
 
 /// Start recording for a new context with the `record_har` option.

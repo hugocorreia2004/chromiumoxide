@@ -605,7 +605,9 @@ fn should_return_from_goto_if_new_navigation_is_started() {
                 .goto(format!("{}/load-event/load-event.html", t.server.prefix))
                 .into_future(),
         );
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        // The document has committed once it requests the hanging script;
+        // a fixed sleep raced with slow CI runners (ERR_ABORTED before commit).
+        t.server.wait_for_request("/slow.js").await;
         assert!(!navigation.is_finished());
         t.page.goto(&t.server.empty_page).await.unwrap();
         let response = navigation.await.unwrap().unwrap().unwrap();
