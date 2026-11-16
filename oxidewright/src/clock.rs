@@ -365,7 +365,7 @@ impl Clock {
 
     async fn run(&self, log: String, call: String) -> Result<()> {
         let context = self.context()?;
-        let mut state = context.inner.ext.clock.lock().await;
+        let mut state = context.inner.emu.clock.lock().await;
         self.install_if_needed(&mut state).await?;
         let init = context.add_init_script(log.clone()).await?;
         state.init_scripts.push(init);

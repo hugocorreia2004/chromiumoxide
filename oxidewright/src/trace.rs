@@ -103,7 +103,7 @@ async fn record_page(page: &Page, data: Arc<Mutex<ChunkData>>) {
     });
     let previous = page
         .inner
-        .ext
+        .emu
         .capture
         .tracing
         .lock()
@@ -116,7 +116,7 @@ async fn record_page(page: &Page, data: Arc<Mutex<ChunkData>>) {
 }
 
 async fn stop_page(page: &Page) {
-    let current = page.inner.ext.capture.tracing.lock().unwrap().take();
+    let current = page.inner.emu.capture.tracing.lock().unwrap().take();
     if let Some((id, task)) = current {
         task.abort();
         screencast::remove_client(page, id).await;
@@ -129,7 +129,7 @@ pub(crate) async fn on_page_created(page: &Page) {
     let Some(context) = page.context() else {
         return;
     };
-    let live = context.inner.ext.capture.live.lock().unwrap().clone();
+    let live = context.inner.emu.capture.live.lock().unwrap().clone();
     if let Some(data) = live {
         record_page(page, data).await;
     }
@@ -152,7 +152,7 @@ impl BrowserContext {
 
 impl Tracing {
     fn state(&self) -> &ContextTracing {
-        &self.context.inner.ext.capture
+        &self.context.inner.emu.capture
     }
 
     /// Start tracing (and the first chunk).

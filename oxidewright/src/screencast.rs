@@ -97,7 +97,7 @@ pub(crate) async fn add_client(
     size: Option<ViewportSize>,
     quality: u32,
 ) -> Result<ScreencastClient> {
-    let state = &page.inner.ext.capture.screencast;
+    let state = &page.inner.emu.capture.screencast;
     let (tx, rx) = unbounded_channel();
     let id = state.next_id.fetch_add(1, Ordering::SeqCst);
     state.clients.lock().unwrap().insert(id, tx);
@@ -179,7 +179,7 @@ pub(crate) async fn add_client(
 
 /// Unsubscribe; the screencast stops with the last subscriber.
 pub(crate) async fn remove_client(page: &Page, id: u64) {
-    let state = &page.inner.ext.capture.screencast;
+    let state = &page.inner.emu.capture.screencast;
     let empty = {
         let mut clients = state.clients.lock().unwrap();
         clients.remove(&id);

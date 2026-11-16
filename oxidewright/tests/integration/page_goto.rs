@@ -76,7 +76,7 @@ fn should_work_with_cross_process_that_fails_before_committing() {
             .await
             .unwrap()
             .unwrap();
-        response.finished().await;
+        response.finished().await.unwrap();
         let _ = t.page.goto(&t.server.empty_page).await;
     });
 }
@@ -93,7 +93,7 @@ fn should_work_with_cross_origin_opener_policy() {
         });
         let response = t.page.goto(&t.server.empty_page).await.unwrap().unwrap();
         assert_eq!(t.page.url(), t.server.empty_page);
-        assert_eq!(response.finished().await, None);
+        response.finished().await.unwrap();
         assert_eq!(response.request().failure(), None);
     });
 }

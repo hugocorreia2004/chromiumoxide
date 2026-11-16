@@ -156,7 +156,7 @@ impl Page {
     /// The video being recorded for this page, when the context was created
     /// with `record_video_dir`.
     pub fn video(&self) -> Option<Video> {
-        self.inner.ext.capture.video.lock().unwrap().clone()
+        self.inner.emu.capture.video.lock().unwrap().clone()
     }
 }
 
@@ -295,7 +295,7 @@ pub(crate) async fn start_for_page(page: &Page) -> Result<()> {
         }
         let _ = done_tx.send(Some(result));
     });
-    *page.inner.ext.capture.video.lock().unwrap() = Some(Video {
+    *page.inner.emu.capture.video.lock().unwrap() = Some(Video {
         inner: Arc::new(VideoInner {
             path,
             finished: done_rx,

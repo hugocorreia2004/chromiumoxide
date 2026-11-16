@@ -627,7 +627,7 @@ async fn screenshot_page(
     progress: &Progress,
 ) -> Result<Vec<u8>> {
     let format = options.format()?;
-    let _queue = page.inner.ext.screenshot_queue.lock().await;
+    let _queue = page.inner.emu.screenshot_queue.lock().await;
     progress.log("taking page screenshot");
     let viewport = original_viewport_size(page).await?;
     prepare_page(page, &page.main_frame(), options, progress).await?;
@@ -659,7 +659,7 @@ async fn screenshot_element(
     progress: &Progress,
 ) -> Result<Vec<u8>> {
     let format = options.format()?;
-    let _queue = page.inner.ext.screenshot_queue.lock().await;
+    let _queue = page.inner.emu.screenshot_queue.lock().await;
     progress.log("taking element screenshot");
     let viewport = original_viewport_size(page).await?;
     let frame = handle
@@ -1019,7 +1019,7 @@ async fn take_screenshot(
             .cloned()
             .unwrap_or(Value::Null);
         let override_dsf = inner
-            .ext
+            .emu
             .metrics_override
             .lock()
             .unwrap()

@@ -874,7 +874,7 @@ impl NavigationEvent {
         self.new_document
             .as_ref()
             .and_then(|d| d.request.as_ref())
-            .and_then(|r| r.final_request().response())
+            .and_then(|r| r.final_request().existing_response())
     }
 }
 
