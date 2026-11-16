@@ -21,6 +21,8 @@ pub(crate) struct ContextExt {
     pub(crate) close_reason: Mutex<Option<String>>,
     /// Fake timers state (`context.clock`).
     pub(crate) clock: tokio::sync::Mutex<crate::clock::ClockState>,
+    /// Tracing state (`context.tracing()`).
+    pub(crate) capture: crate::trace::ContextTracing,
 }
 
 impl ContextExt {
@@ -60,4 +62,6 @@ pub(crate) struct PageExt {
     pub(crate) close_reason: Mutex<Option<String>>,
     /// JS/CSS coverage state.
     pub(crate) coverage: tokio::sync::Mutex<crate::coverage::CoverageState>,
+    /// Screencast, video and tracing state.
+    pub(crate) capture: crate::screencast::PageCapture,
 }

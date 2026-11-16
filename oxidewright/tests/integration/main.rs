@@ -10,3 +10,5 @@ mod page_evaluate;
 mod page_goto;
 mod page_wait_for;
 mod smoke;
+mod tracing;
+mod video;

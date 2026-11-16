@@ -69,6 +69,10 @@ pub struct NewContextOptions {
     pub service_workers: crate::emulation::ServiceWorkerPolicy,
     /// Initial cookies and storage.
     pub storage_state: Option<crate::storage_state::StorageStateSource>,
+    /// Record a video of every page into this directory (requires ffmpeg).
+    pub record_video_dir: Option<std::path::PathBuf>,
+    /// Size of the recorded videos.
+    pub record_video_size: Option<ViewportSize>,
 }
 
 impl Default for NewContextOptions {
@@ -111,6 +115,8 @@ impl NewContextOptions {
             strict_selectors: false,
             service_workers: Default::default(),
             storage_state: None,
+            record_video_dir: None,
+            record_video_size: None,
         }
     }
 }
@@ -205,6 +211,7 @@ impl BrowserContext {
         let inner = PageInner::attach(cdp, Arc::downgrade(&browser), self).await?;
         let page = Page::from_inner(inner);
         crate::emulation::init_page(&page).await?;
+        crate::screencast::on_page_created(&page).await?;
         let scripts = self.inner.init_scripts.lock().unwrap().clone();
         for script in scripts {
             page.inner.add_init_script_source(script).await?;
@@ -285,6 +292,7 @@ impl BrowserContext {
     }
 
     pub(crate) async fn close_impl(&self) -> Result<()> {
+        crate::video::on_context_closing(self).await;
         async {
             if self.inner.closed.swap(true, Ordering::SeqCst) {
                 return Ok(());
@@ -350,6 +358,7 @@ impl IntoFuture for NewContext {
         Box::pin(async move {
             async {
                 crate::emulation::validate_options(&self.options)?;
+                crate::video::validate_options(&self.options)?;
                 let context = self.browser.inner.create_context(self.options).await?;
                 if let Err(err) = crate::emulation::init_context(&context).await {
                     let _ = context.close().await;

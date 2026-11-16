@@ -57,8 +57,11 @@ mod page;
 mod page_extras;
 mod pdf;
 mod progress;
+mod screencast;
 mod storage_state;
+pub mod trace;
 mod url_match;
+pub mod video;
 
 pub use browser::Browser;
 pub use browser_context::{BrowserContext, NewContext, NewContextOptions};
@@ -90,7 +93,9 @@ pub use progress::DEFAULT_TIMEOUT;
 pub use storage_state::{
     NameValue, OriginState, StorageState, StorageStateBuilder, StorageStateSource,
 };
+pub use trace::{Tracing, TracingStart, TracingStop};
 pub use url_match::{UrlMatch, glob_to_regex_pattern};
+pub use video::Video;
 
 /// Re-export of the underlying CDP library.
 pub use chromiumoxide;

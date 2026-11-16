@@ -1477,6 +1477,7 @@ impl Page {
     }
 
     pub(crate) async fn close_impl(&self) -> Result<()> {
+        crate::screencast::on_page_closing(self).await;
         async {
             if self.inner.is_closed() {
                 return Ok(());

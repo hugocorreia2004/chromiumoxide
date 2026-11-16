@@ -70,6 +70,17 @@ Implemented: `chromium()`, `BrowserType::{launch, connect_over_cdp}`, `Browser`,
 Planned: locators, actions and selectors; network routing and events; keyboard, mouse and
 touch; dialogs, downloads, workers and the rest of the Playwright API.
 
+### Tracing and video
+
+* `context.tracing()` writes zips in Playwright's trace format (open them with
+  `npx playwright show-trace`). They contain the context header, screencast frames
+  (`screenshots(true)`) and `group`/`group_end` entries. Per-action events, DOM
+  snapshots, network entries, console messages and sources are not recorded yet.
+* `record_video_dir(..)` records a WebM video per page (`page.video()`), encoded by an
+  external `ffmpeg` with the `libvpx` encoder: set `OXIDEWRIGHT_FFMPEG_PATH` or put
+  `ffmpeg` on `PATH` (Playwright bundles its own build; oxidewright does not).
+* Both use `Page.startScreencast`, which page scripts cannot observe.
+
 ## Updating the bundled scripts
 
 ```sh
