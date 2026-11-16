@@ -55,6 +55,7 @@ mod error;
 mod events;
 pub mod execution_context;
 mod ext;
+pub mod fetch;
 mod file_chooser;
 mod frame;
 mod har;
@@ -95,6 +96,10 @@ pub use emulation::{
 pub use error::{CONTEXT_DESTROYED_MESSAGE, Error, Result, TARGET_CLOSED_MESSAGE};
 pub use events::{Event, EventKind, ListenerId, WaitForEvent};
 pub use execution_context::{ExecutionContext, World};
+pub use fetch::{
+    APIRequest, APIRequestContext, FilePayload, HttpCredentialsSend, MultipartValue, ProxySettings,
+    RequestData, request,
+};
 pub use file_chooser::FileChooser;
 pub use frame::{
     Frame, FrameEvaluate, FrameEvaluateHandle, Goto, LoadState, SetContent, WaitForLoadState,

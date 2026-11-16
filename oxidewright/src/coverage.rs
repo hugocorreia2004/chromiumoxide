@@ -107,6 +107,7 @@ struct CssData {
 type Tasks = Vec<tokio::task::JoinHandle<()>>;
 
 /// Coverage state of a page.
+#[allow(clippy::type_complexity)]
 #[derive(Default)]
 pub(crate) struct CoverageState {
     /// Collected data, listener tasks and `reportAnonymousScripts`.
