@@ -5,6 +5,7 @@ mod browser;
 mod common;
 mod content;
 mod frames;
+mod input;
 mod jshandle;
 mod page_evaluate;
 mod page_goto;

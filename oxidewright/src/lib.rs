@@ -40,9 +40,9 @@
 mod browser;
 mod browser_context;
 mod browser_type;
+mod element_actions;
 mod error;
 pub mod execution_context;
-mod element_actions;
 mod frame;
 pub mod input;
 pub mod js;
@@ -66,7 +66,12 @@ pub use frame::{
     Frame, FrameEvaluate, FrameEvaluateHandle, Goto, LoadState, SetContent, WaitForLoadState,
     WaitForNavigation, WaitForUrl,
 };
+pub use input::{
+    Keyboard, KeyboardModifier, KeyboardPress, KeyboardType, Mouse, MouseButton, MouseButtonAction,
+    MouseClick, MouseMove, Touchscreen,
+};
 pub use js::JsValue;
+pub use locator_utils::{JsRegex, TextMatch, regex};
 pub use js_handle::{ElementHandle, EvaluateHandleOn, EvaluateOn, JSHandle};
 pub use network::{Request, Response};
 pub use page::{AddInitScript, GoHistory, InitScript, Page, Reload, ViewportSize};

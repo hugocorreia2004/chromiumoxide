@@ -194,6 +194,7 @@ impl PageInner {
         page.handle_frame_tree(&tree);
         page.attach_out_of_process_frames().await;
 
+        page.input.bind_page(Arc::downgrade(&page));
         *page.events.lock().unwrap() = Some(rx);
         tokio::spawn(pump(page.clone(), timer_rx));
 
