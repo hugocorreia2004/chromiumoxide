@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html>
+<head>
+<style>
+  body { margin: 0; }
+  /* Centers at (120, 86) and (240, 350), like Playwright's drag-n-drop.html. */
+  #source { position: absolute; left: 70px; top: 61px; width: 100px; height: 50px; background: red; }
+  #target { position: absolute; left: 90px; top: 200px; width: 300px; height: 300px; background: blue; }
+</style>
+</head>
+<body>
+<div id="target" ondrop="drop(event)" ondragover="allowDrop(event)"></div>
+<div id="source" draggable="true" ondragstart="drag(event)"></div>
+<script>
+  function allowDrop(ev) {
+    ev.preventDefault();
+  }
+  function drag(ev) {
+    ev.dataTransfer.setData('text', ev.target.id);
+  }
+  function drop(ev) {
+    ev.preventDefault();
+    const data = ev.dataTransfer.getData('text');
+    ev.target.appendChild(document.getElementById(data));
+  }
+</script>
+</body>
+</html>

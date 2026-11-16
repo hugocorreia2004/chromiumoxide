@@ -84,6 +84,8 @@ impl PartialEq for Page {
 #[derive(Clone)]
 pub(crate) enum PageEvent {
     Navigated(NavigationEvent),
+    /// `Page.frameRequestedNavigation` (current tab) for a frame.
+    NavigationRequested(String),
     Lifecycle(String, LoadState),
     #[allow(dead_code)] // consumed by the events API
     FrameAttached(String),
@@ -141,6 +143,8 @@ pub(crate) struct PageInner {
     pub(crate) ext: PageExt,
     timer_tx: UnboundedSender<(String, u64)>,
     pub(crate) viewport: Mutex<Option<ViewportSize>>,
+    /// Keyboard, mouse and touchscreen state (see [`crate::input`]).
+    pub(crate) input: Arc<crate::input::InputState>,
     pub(crate) emu: crate::ext::PageExt,
     /// Protocol events not yet applied; drained by the pump task and, for
     /// accessors, synchronously (see [`PageInner::sync`]).
@@ -160,6 +164,7 @@ impl PageInner {
         let world_name: String = std::iter::repeat_with(fastrand::alphanumeric)
             .take(16)
             .collect();
+        let input = crate::input::InputState::new(cdp.clone());
         let page = Arc::new_cyclic(|weak| PageInner {
             cdp,
             browser,
@@ -175,6 +180,7 @@ impl PageInner {
             ext: PageExt::default(),
             timer_tx,
             viewport: Mutex::new(None),
+            input,
             emu: Default::default(),
             events: Mutex::new(None),
             self_weak: weak.clone(),
@@ -195,6 +201,7 @@ impl PageInner {
         page.handle_frame_tree(&tree);
         page.attach_out_of_process_frames().await;
 
+        page.input.bind_page(Arc::downgrade(&page));
         *page.events.lock().unwrap() = Some(rx);
         tokio::spawn(pump(page.clone(), timer_rx));
 
@@ -377,7 +384,7 @@ impl PageInner {
     }
 
     pub(crate) fn test_id_attribute_name(&self) -> String {
-        "data-testid".to_string()
+        crate::selectors::test_id_attribute_name()
     }
 
     pub(crate) fn resolve_url(&self, url: &str) -> String {
@@ -963,8 +970,12 @@ impl PageInner {
         let any = match any.downcast::<EventFrameRequestedNavigation>() {
             Ok(ev) => {
                 if ev.disposition == ClientNavigationDisposition::CurrentTab {
-                    let mut state = self.tree.lock().unwrap();
-                    self.requested_navigation(&mut state, ev.frame_id.as_ref(), None);
+                    self.with_effects(|this, state, fx| {
+                        this.requested_navigation(state, ev.frame_id.as_ref(), None);
+                        fx.events.push(PageEvent::NavigationRequested(
+                            ev.frame_id.as_ref().to_string(),
+                        ));
+                    });
                 }
                 return;
             }

@@ -37,6 +37,7 @@
 // CDP parameter structs are built with `Default` and then filled in.
 #![allow(clippy::field_reassign_with_default)]
 
+pub mod actions;
 mod browser;
 mod browser_context;
 mod browser_type;
@@ -50,6 +51,7 @@ mod cookies;
 pub mod coverage;
 mod dialog;
 mod download;
+mod element_actions;
 pub mod emulation;
 mod error;
 mod events;
@@ -58,9 +60,14 @@ mod ext;
 pub mod fetch;
 mod file_chooser;
 mod frame;
+mod frame_selectors;
 mod har;
+pub mod input;
 pub mod js;
 mod js_handle;
+mod locator;
+mod locator_generators;
+mod locator_utils;
 mod network;
 mod network_manager;
 mod page;
@@ -71,6 +78,8 @@ mod progress;
 mod route;
 mod screencast;
 mod screenshot;
+mod selector_parser;
+mod selectors;
 mod storage_state;
 pub mod trace;
 mod url_match;
@@ -78,6 +87,11 @@ pub mod video;
 mod websocket;
 mod worker;
 
+pub use actions::{
+    Action, BoundingBox, Click, Dblclick, ElementState, Fill, Hover, InputFiles, Position, Press,
+    SelectOption, SelectOptionAction, SelectValue, SelectValues, SetChecked, SetInputFiles, Tap,
+    Type, WaitForSelector, kinds,
+};
 pub use browser::Browser;
 pub use browser_context::{BrowserContext, NewContext, NewContextOptions};
 pub use browser_type::{BrowserType, ConnectOverCdp, Launch, LaunchOptions, chromium};
@@ -85,13 +99,14 @@ pub use cdp_session::{CDPSession, CdpSessionTarget};
 pub use clock::{Clock, ClockInstall, ClockTicks, ClockTime};
 pub use console::{ConsoleMessage, ConsoleMessageLocation, WebError};
 pub use context_options::{Device, devices};
-pub use cookies::{ClearCookies, Cookie, Cookies, SameSite, SetCookie, TextMatch};
+pub use cookies::{ClearCookies, Cookie, Cookies, SameSite, SetCookie};
 pub use coverage::{
     CoverageRange, CssCoverageEntry, FunctionCoverage, JsCoverageEntry, StartCssCoverage,
     StartJsCoverage, TextRange,
 };
 pub use dialog::Dialog;
 pub use download::Download;
+pub use element_actions::WaitForSelectorState;
 pub use emulation::{
     ColorScheme, Contrast, EmulateMedia, ForcedColors, Geolocation, GrantPermissions, Media,
     ReducedMotion, ServiceWorkerPolicy,
@@ -109,8 +124,16 @@ pub use frame::{
     WaitForNavigation, WaitForUrl,
 };
 pub use har::{HarContentPolicy, HarMode, HarNotFound, RecordHar, RouteFromHar};
+pub use input::{
+    Keyboard, KeyboardModifier, KeyboardPress, KeyboardType, Mouse, MouseButton, MouseButtonAction,
+    MouseClick, MouseMove, Touchscreen,
+};
 pub use js::JsValue;
 pub use js_handle::{ElementHandle, EvaluateHandleOn, EvaluateOn, JSHandle};
+pub use locator::{
+    FrameLocator, GetByOptions, GetByRoleOptions, Locator, LocatorOptions, SelectorOrLocator,
+};
+pub use locator_utils::{JsRegex, TextMatch, regex};
 pub use network::{
     Header, RemoteAddr, Request, RequestSizes, ResourceTiming, Response, SecurityDetails,
 };
@@ -127,6 +150,7 @@ pub use screenshot::{
     Animations, Caret, ElementScreenshot, Mask, PageScreenshot, Rect, ScreenshotScale,
     ScreenshotType,
 };
+pub use selectors::{Selectors, selectors};
 pub use storage_state::{
     NameValue, OriginState, StorageState, StorageStateBuilder, StorageStateSource,
 };

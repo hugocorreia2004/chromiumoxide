@@ -9,8 +9,7 @@
 //! * SS-002..SS-004 (blinking caret: need keyboard input), SS-022, SS-024,
 //!   SS-025, SS-095, SS-026, SS-028, SS-038, SS-066, SS-067 (pure golden
 //!   comparisons of rendering details).
-//! * SS-041 and other `locator.screenshot` tests: `Locator` is another module
-//!   (masks take a frame + selector here).
+//! * SS-045 (parallel screenshots of one page with masks: golden comparison).
 //! * SS-055, SS-058..SS-063 (test hooks / event ordering of animations).
 //! * SS-065, SS-077 (huge pages, slow and platform dependent).
 //! * EH-076 (needs `page.$`), EH-078/EH-079 (golden comparisons of huge elements).
@@ -955,3 +954,101 @@ fn element_screenshot_in_iframe() {
 }
 
 use std::future::IntoFuture;
+
+/// Center of the `index`-th `div` of `frame`, in its viewport coordinates.
+async fn div_center(frame: &oxidewright::Frame, index: usize) -> (u32, u32) {
+    let (x, y): (f64, f64) = frame
+        .evaluate(
+            "i => { const r = document.querySelectorAll('div')[i].getBoundingClientRect(); return [r.x + r.width / 2, r.y + r.height / 2]; }",
+        )
+        .arg(index)
+        .await
+        .unwrap();
+    (x as u32, y as u32)
+}
+
+const MAGENTA: [u8; 4] = [255, 0, 255, 255];
+
+#[test]
+fn ss_041_mask_should_work_with_locator() {
+    run(|t| async move {
+        grid(&t).await;
+        let body = t.page.locator("body");
+        let png = body
+            .screenshot()
+            .mask([t.page.locator("div").nth(5)])
+            .await
+            .unwrap();
+        // The body starts at the page origin (margin: 0).
+        let point = div_center(&t.page.main_frame(), 5).await;
+        let decoded = decode(&t.context, &png, &[point, (2, 2)]).await;
+        assert_eq!(decoded.pixels[0], MAGENTA);
+        assert_ne!(decoded.pixels[1], MAGENTA);
+    });
+}
+
+#[test]
+fn ss_042_mask_should_work_with_elementhandle() {
+    run(|t| async move {
+        grid(&t).await;
+        let body = element(&t.page, "body").await;
+        let png = body
+            .screenshot()
+            .mask([&t.page.locator("div").nth(5)])
+            .await
+            .unwrap();
+        let point = div_center(&t.page.main_frame(), 5).await;
+        let decoded = decode(&t.context, &png, &[point]).await;
+        assert_eq!(decoded.pixels[0], MAGENTA);
+    });
+}
+
+#[test]
+fn ss_043_should_mask_multiple_elements() {
+    run(|t| async move {
+        grid(&t).await;
+        let png = t
+            .page
+            .screenshot()
+            .mask([t.page.locator("div").nth(5), t.page.locator("div").nth(12)])
+            .await
+            .unwrap();
+        let a = div_center(&t.page.main_frame(), 5).await;
+        let b = div_center(&t.page.main_frame(), 12).await;
+        let c = div_center(&t.page.main_frame(), 6).await;
+        let decoded = decode(&t.context, &png, &[a, b, c]).await;
+        assert_eq!(decoded.pixels[0], MAGENTA);
+        assert_eq!(decoded.pixels[1], MAGENTA);
+        assert_ne!(decoded.pixels[2], MAGENTA);
+    });
+}
+
+#[test]
+fn ss_044_should_mask_inside_iframe() {
+    run(|t| async move {
+        grid(&t).await;
+        let frame =
+            attach_frame(&t.page, "frame1", &format!("{}/grid.html", t.server.prefix)).await;
+        t.page
+            .evaluate::<()>(
+                "() => { const s = document.createElement('style'); s.textContent = 'iframe { border: none; }'; document.head.appendChild(s); document.querySelector('#frame1').scrollIntoView(); }",
+            )
+            .await
+            .unwrap();
+        let png = t
+            .page
+            .screenshot()
+            .mask([t.page.frame_locator("#frame1").locator("div").nth(12)])
+            .await
+            .unwrap();
+        let (fx, fy): (f64, f64) = t
+            .page
+            .evaluate("() => { const r = document.querySelector('#frame1').getBoundingClientRect(); return [r.x, r.y]; }")
+            .await
+            .unwrap();
+        let (x, y) = div_center(&frame, 12).await;
+        let inside = (fx as u32 + x, fy as u32 + y);
+        let decoded = decode(&t.context, &png, &[inside]).await;
+        assert_eq!(decoded.pixels[0], MAGENTA);
+    });
+}

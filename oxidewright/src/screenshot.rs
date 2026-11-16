@@ -17,8 +17,10 @@ use crate::cdp_raw::RawCommand;
 use crate::error::{Error, Result};
 use crate::execution_context::{Evaluated, World};
 use crate::frame::Frame;
+use crate::frame_selectors::{CallArg, CallOptions, SelectorTarget, call_on_selector};
 use crate::js::serde_impl::from_js_value;
 use crate::js_handle::{ElementHandle, serialize_arg};
+use crate::locator::Locator;
 use crate::page::{Page, PageInner, ViewportSize};
 use crate::progress::Progress;
 
@@ -151,8 +153,18 @@ impl Mask {
     }
 }
 
-// TODO(locators): `impl From<&Locator> for Mask` (frame + selector of the
-// locator) once `Locator` lands, so `.mask([page.locator("..")])` works.
+impl From<&Locator> for Mask {
+    /// Every element the locator matches (in any of its frames).
+    fn from(locator: &Locator) -> Self {
+        Self::new(locator.frame(), locator.selector())
+    }
+}
+
+impl From<Locator> for Mask {
+    fn from(locator: Locator) -> Self {
+        Mask::from(&locator)
+    }
+}
 
 const PREPARE_FOR_SCREENSHOTS: &str = r#"function inPagePrepareForScreenshots(screenshotStyle, hideCaret, disableAnimations, syncAnimations) {
   if (syncAnimations) {
@@ -357,9 +369,10 @@ macro_rules! screenshot_builder_methods {
         /// Cover elements with a box of [`Self::mask_color`].
         pub fn mask<I>(mut self, masks: I) -> Self
         where
-            I: IntoIterator<Item = Mask>,
+            I: IntoIterator,
+            I::Item: Into<Mask>,
         {
-            self.options.mask.extend(masks);
+            self.options.mask.extend(masks.into_iter().map(Into::into));
             self
         }
 
@@ -411,20 +424,20 @@ impl PageScreenshot {
 /// Builder returned by [`ElementHandle::screenshot`]; `.await` it.
 #[must_use = "builders do nothing unless awaited"]
 pub struct ElementScreenshot {
-    handle: ElementHandle,
+    target: ScreenshotTarget,
     api: &'static str,
     options: ScreenshotOptions,
 }
 
 impl ElementScreenshot {
     screenshot_builder_methods!();
+}
 
-    /// Report errors under another API name (used by `locator.screenshot`).
-    #[allow(dead_code)]
-    pub(crate) fn with_api(mut self, api: &'static str) -> Self {
-        self.api = api;
-        self
-    }
+/// What an [`ElementScreenshot`] captures.
+enum ScreenshotTarget {
+    Handle(ElementHandle),
+    /// Resolved when awaited (`Locator._withElement`).
+    Locator(Locator),
 }
 
 impl Page {
@@ -448,8 +461,20 @@ impl ElementHandle {
     /// Take a screenshot of the element, scrolling it into view first.
     pub fn screenshot(&self) -> ElementScreenshot {
         ElementScreenshot {
-            handle: self.clone(),
+            target: ScreenshotTarget::Handle(self.clone()),
             api: "elementHandle.screenshot",
+            options: ScreenshotOptions::default(),
+        }
+    }
+}
+
+impl Locator {
+    /// Take a screenshot of the element this locator resolves to (waiting
+    /// for it, strict), like [`ElementHandle::screenshot`].
+    pub fn screenshot(&self) -> ElementScreenshot {
+        ElementScreenshot {
+            target: ScreenshotTarget::Locator(self.clone()),
+            api: "locator.screenshot",
             options: ScreenshotOptions::default(),
         }
     }
@@ -480,17 +505,45 @@ impl IntoFuture for ElementScreenshot {
     type IntoFuture = BoxFuture<Result<Vec<u8>>>;
     fn into_future(self) -> Self::IntoFuture {
         Box::pin(async move {
-            let frame = self.handle.context().frame();
+            let api = self.api;
+            let started = std::time::Instant::now();
+            let (handle, owned, timeout) = match self.target {
+                ScreenshotTarget::Handle(handle) => (handle, false, None),
+                ScreenshotTarget::Locator(locator) => {
+                    let page = locator
+                        .page()
+                        .ok_or_else(|| Error::target_closed().with_api(api))?;
+                    let timeout = page.inner.timeouts.timeout(self.options.timeout);
+                    let handle = locator
+                        .element_handle_as(api)
+                        .timeout(timeout)
+                        .await
+                        .map_err(|e| e.with_api(api))?;
+                    (handle, true, Some(timeout))
+                }
+            };
+            let frame = handle.context().frame();
             let page = frame
                 .as_ref()
                 .and_then(|f| f.page())
-                .ok_or_else(|| Error::target_closed().with_api(self.api))?;
-            let timeout = page.inner.timeouts.timeout(self.options.timeout);
-            let progress = Progress::new(self.api, timeout);
+                .ok_or_else(|| Error::target_closed().with_api(api))?;
+            // A locator shares one timeout between resolving and capturing.
+            let timeout = match timeout {
+                Some(0) => 0,
+                Some(t) => t
+                    .saturating_sub(started.elapsed().as_millis() as u64)
+                    .max(1),
+                None => page.inner.timeouts.timeout(self.options.timeout),
+            };
+            let progress = Progress::new(api, timeout);
             let options = self.options;
-            let bytes = progress
-                .run(screenshot_element(&page, &self.handle, &options, &progress))
-                .await?;
+            let result = progress
+                .run(screenshot_element(&page, &handle, &options, &progress))
+                .await;
+            if owned {
+                handle.dispose().await;
+            }
+            let bytes = result?;
             if let Some(path) = &options.path {
                 crate::storage_state::write_file(path, &bytes).await?;
             }
@@ -892,32 +945,29 @@ async fn set_background(page: &Page, transparent: bool) -> Result<()> {
     Ok(())
 }
 
+/// `Screenshotter._maskElements`: masks are resolved like any selector
+/// (`frameSelectors.callOnSelector`, non-strict), so locators inside frames
+/// work too. Returns the frames to clean up (all of the page's, like
+/// `highlightController.hideHighlights`).
 async fn mask_elements(page: &Page, options: &ScreenshotOptions) -> Result<Vec<Frame>> {
-    let mut frames = Vec::new();
+    if options.mask.is_empty() {
+        return Ok(Vec::new());
+    }
     let color = options
         .mask_color
         .clone()
         .unwrap_or_else(|| "#F0F".to_string());
     for mask in &options.mask {
-        let context = mask.frame.context(World::Utility).await?;
-        let injected = context.injected_script().await?;
-        let (arg, handles) =
-            serialize_arg(&(injected, &mask.selector, &color))?.unwrap_or_default();
-        context
-            .evaluate_expression(
-                "([injected, selector, color]) => { const elements = injected.querySelectorAll(injected.parseSelector(selector), document); injected.addMaskedElements(elements, color); }",
-                Some(true),
-                true,
-                vec![arg],
-                handles,
-            )
-            .await?;
-        if !frames.contains(&mask.frame) {
-            frames.push(mask.frame.clone());
-        }
+        call_on_selector(
+            &mask.frame,
+            &SelectorTarget::new(mask.selector.clone(), false),
+            "({ injected, elements }, color) => { injected.addMaskedElements(elements, color); }",
+            CallArg::Json(Value::String(color.clone())),
+            CallOptions::default(),
+        )
+        .await?;
     }
-    let _ = page;
-    Ok(frames)
+    Ok(page.frames())
 }
 
 async fn hide_masks(frames: &[Frame]) {

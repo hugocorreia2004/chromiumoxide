@@ -1,0 +1,16 @@
+<!DOCTYPE html>
+<script>
+  window.result = 'Not oriented';
+  function handler(e) {
+    // Chrome fires real (trusted) events with null values on machines
+    // without sensors; only the test's dispatched events count.
+    if (e.isTrusted) return;
+    window.result = 'Oriented';
+    window.alpha = e.alpha;
+    window.beta = e.beta;
+    window.gamma = e.gamma;
+    window.absolute = e.absolute;
+  }
+  window.addEventListener('deviceorientation', handler);
+  window.addEventListener('deviceorientationabsolute', handler);
+</script>

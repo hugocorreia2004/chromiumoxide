@@ -231,53 +231,14 @@ impl From<&Cookie> for SetCookie {
     }
 }
 
-/// A string or regular expression used to filter values (`name`, `domain`
-/// and `path` of [`BrowserContext::clear_cookies`]).
-#[derive(Debug, Clone)]
-pub enum TextMatch {
-    /// Exact string equality.
-    Exact(String),
-    /// Regular expression search.
-    Regex(regex::Regex),
-}
+pub use crate::locator_utils::TextMatch;
 
-impl TextMatch {
-    /// Whether `value` matches.
-    pub fn matches(&self, value: &str) -> bool {
-        match self {
-            TextMatch::Exact(s) => s == value,
-            TextMatch::Regex(re) => re.is_match(value),
-        }
-    }
-}
-
-impl From<&str> for TextMatch {
-    fn from(s: &str) -> Self {
-        TextMatch::Exact(s.to_string())
-    }
-}
-
-impl From<String> for TextMatch {
-    fn from(s: String) -> Self {
-        TextMatch::Exact(s)
-    }
-}
-
-impl From<&String> for TextMatch {
-    fn from(s: &String) -> Self {
-        TextMatch::Exact(s.clone())
-    }
-}
-
-impl From<regex::Regex> for TextMatch {
-    fn from(re: regex::Regex) -> Self {
-        TextMatch::Regex(re)
-    }
-}
-
-impl From<&regex::Regex> for TextMatch {
-    fn from(re: &regex::Regex) -> Self {
-        TextMatch::Regex(re.clone())
+/// `string | RegExp` filter matching of `clear_cookies` (exact string
+/// equality or regular expression search).
+fn text_matches(filter: &TextMatch, value: &str) -> bool {
+    match filter {
+        TextMatch::Text(s) => s == value,
+        TextMatch::Regex(re) => re.to_regex().is_some_and(|re| re.is_match(value)),
     }
 }
 
@@ -296,7 +257,7 @@ impl ClearCookiesFilter {
 
     pub(crate) fn matches(&self, cookie: &Cookie) -> bool {
         let check = |filter: &Option<TextMatch>, value: &str| {
-            filter.as_ref().is_none_or(|f| f.matches(value))
+            filter.as_ref().is_none_or(|f| text_matches(f, value))
         };
         check(&self.name, &cookie.name)
             && check(&self.domain, &cookie.domain)

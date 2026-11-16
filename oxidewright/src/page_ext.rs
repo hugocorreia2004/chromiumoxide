@@ -315,6 +315,8 @@ async fn forward_page_events(
                     _ => {}
                 }
             }
+            // Only used internally (actions waiting for navigations).
+            PageEvent::NavigationRequested(_) => {}
         }
     }
 }

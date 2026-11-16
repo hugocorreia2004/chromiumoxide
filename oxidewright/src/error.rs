@@ -133,15 +133,58 @@ fn render(api: &Option<String>, message: &str, log: &[String]) -> String {
     out.push_str(message);
     if !log.is_empty() {
         out.push_str("\nCall log:\n");
-        for (i, line) in log.iter().enumerate() {
-            if i > 0 {
-                out.push('\n');
-            }
-            out.push_str("  - ");
-            out.push_str(line.trim_start());
-        }
+        out.push_str(&compress_call_log(log).join("\n"));
     }
     out
+}
+
+/// Port of Playwright's `compressCallLog` (server/callLog.ts): consecutive
+/// repetitions of a block of lines are rendered once, prefixed by `N × `.
+pub(crate) fn compress_call_log(log: &[String]) -> Vec<String> {
+    let mut lines = Vec::new();
+    for (sequence, count) in find_repeated_subsequences(log) {
+        let count_prefix = format!("{count} × ");
+        for (i, line) in sequence.iter().enumerate() {
+            let leading = &line[..line.len() - line.trim_start().len()];
+            let prefix = format!("  {leading}");
+            let trimmed = line.trim();
+            if count > 1 && i == 0 {
+                lines.push(format!("{prefix}{count_prefix}{trimmed}"));
+            } else if count > 1 {
+                let pad = " ".repeat(count_prefix.chars().count() - 2);
+                lines.push(format!("{prefix}{pad}- {trimmed}"));
+            } else {
+                lines.push(format!("{prefix}- {trimmed}"));
+            }
+        }
+    }
+    lines
+}
+
+/// Port of Playwright's `findRepeatedSubsequences`.
+fn find_repeated_subsequences(s: &[String]) -> Vec<(&[String], usize)> {
+    let n = s.len();
+    let mut result = Vec::new();
+    let mut i = 0;
+    while i < n {
+        let mut max_count = 1;
+        let mut max_len = 1;
+        for p in 1..=n - i {
+            let sub = &s[i..i + p];
+            let mut k = 1;
+            while i + p * k <= n && &s[i + p * (k - 1)..i + p * k] == sub {
+                k += 1;
+            }
+            k -= 1;
+            if k > 1 && k * p > max_count * max_len {
+                max_count = k;
+                max_len = p;
+            }
+        }
+        result.push((&s[i..i + max_len], max_count));
+        i += max_len * max_count;
+    }
+    result
 }
 
 macro_rules! ctor {
@@ -357,5 +400,37 @@ pub(crate) trait ResultExt<T> {
 impl<T> ResultExt<T> for Result<T> {
     fn api(self, name: &str) -> Result<T> {
         self.map_err(|e| e.with_api(name))
+    }
+}
+
+#[cfg(test)]
+mod call_log_tests {
+    use super::compress_call_log;
+
+    fn v(lines: &[&str]) -> Vec<String> {
+        lines.iter().map(|l| l.to_string()).collect()
+    }
+
+    #[test]
+    fn compresses_repeated_blocks() {
+        let log = v(&[
+            "waiting for locator('input')",
+            "  locator resolved",
+            "attempting click",
+            "  not visible",
+            "attempting click",
+            "  not visible",
+            "attempting click",
+            "  not visible",
+        ]);
+        assert_eq!(
+            compress_call_log(&log),
+            v(&[
+                "  - waiting for locator('input')",
+                "    - locator resolved",
+                "  3 × attempting click",
+                "      - not visible",
+            ])
+        );
     }
 }
