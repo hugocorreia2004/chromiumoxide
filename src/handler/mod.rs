@@ -100,6 +100,12 @@ pub struct Handler {
     event_listeners: EventListeners,
     /// Keeps track is the browser is closing
     closing: bool,
+    /// `Browser.close` was sent: the connection is expected to go away, so
+    /// its end is not an error.
+    close_requested: bool,
+    /// The connection ended. Every later poll settles new requests with an
+    /// error and returns `Poll::Ready(None)`.
+    terminated: bool,
 }
 
 impl Handler {
@@ -140,6 +146,8 @@ impl Handler {
             config,
             event_listeners: Default::default(),
             closing: false,
+            close_requested: false,
+            terminated: false,
         }
     }
 
@@ -289,6 +297,12 @@ impl Handler {
                     error_text,
                 );
                 return;
+            }
+        }
+
+        if let Some(NavigationRequest::Navigate(nav)) = self.navigations.get(&id) {
+            if let Some(target) = self.targets.get_mut(&nav.target_id) {
+                target.on_navigation_response(id, navigate_result.loader_id.clone());
             }
         }
 
@@ -709,6 +723,7 @@ impl Handler {
     }
 
     fn submit_close(&mut self, tx: OneshotSender<Result<CloseReturns>>, now: Instant) {
+        self.close_requested = true;
         let close_msg = CloseParams::default();
         let method = close_msg.identifier();
 
@@ -930,7 +945,7 @@ impl Handler {
             if let Some(NavigationRequest::Navigate(navigation)) =
                 self.navigations.remove(navigation_id)
             {
-                let _ = navigation.tx.send(Err(CdpError::NoResponse));
+                let _ = navigation.tx.send(Err(CdpError::TargetClosed));
             }
         }
 
@@ -940,15 +955,15 @@ impl Handler {
             };
             match pending {
                 PendingRequest::ExternalCommand { tx, .. } => {
-                    let _ = tx.send(Err(CdpError::NoResponse));
+                    let _ = tx.send(Err(CdpError::TargetClosed));
                 }
                 PendingRequest::Navigate(_) | PendingRequest::InternalCommand(_, _) => {}
                 PendingRequest::PreloadAddScript { .. } => {}
                 PendingRequest::AddPreloadScriptMain { tx, .. } => {
-                    let _ = tx.send(Err(CdpError::NoResponse));
+                    let _ = tx.send(Err(CdpError::TargetClosed));
                 }
                 PendingRequest::FanOutAckMember { group_id, .. } => {
-                    self.fail_ack_group(group_id, CdpError::NoResponse);
+                    self.fail_ack_group(group_id, CdpError::TargetClosed);
                 }
                 PendingRequest::CreateTarget(_)
                 | PendingRequest::GetTargets(_)
@@ -1002,7 +1017,9 @@ impl Handler {
                     let _ = tx.send(Err(CdpError::NoResponse));
                 }
                 PendingRequest::CloseBrowser(tx) => {
-                    let _ = tx.send(Err(CdpError::NoResponse));
+                    // The browser went away while closing, which is what
+                    // was asked for.
+                    let _ = tx.send(Ok(CloseReturns {}));
                 }
             }
         }
@@ -1013,6 +1030,43 @@ impl Handler {
                     let _ = navigation.tx.send(Err(CdpError::NoResponse));
                 }
             }
+        }
+    }
+
+    /// The connection ended: settle everything in flight, stop accepting new
+    /// requests and settle those already queued, so no caller waits forever.
+    fn terminate(&mut self) {
+        self.terminated = true;
+        self.fail_all_pending_on_connection_close();
+        self.from_browser.get_mut().close();
+        while let Ok(message) = self.from_browser.get_mut().try_recv() {
+            Self::settle_message_after_termination(message);
+        }
+    }
+
+    fn settle_message_after_termination(message: HandlerMessage) {
+        match message {
+            HandlerMessage::CreatePage(_, tx) => {
+                let _ = tx.send(Err(CdpError::NoResponse));
+            }
+            HandlerMessage::FetchTargets(tx) => {
+                let _ = tx.send(Err(CdpError::NoResponse));
+            }
+            HandlerMessage::GetPages(tx) => {
+                let _ = tx.send(Vec::new());
+            }
+            HandlerMessage::Command(command) => {
+                let _ = command.sender.send(Err(CdpError::NoResponse));
+            }
+            HandlerMessage::GetPage(_, tx) => {
+                let _ = tx.send(None);
+            }
+            HandlerMessage::CloseBrowser(tx) => {
+                let _ = tx.send(Ok(CloseReturns {}));
+            }
+            HandlerMessage::InsertContext(_)
+            | HandlerMessage::DisposeContext(_)
+            | HandlerMessage::AddEventListener(_) => {}
         }
     }
 
@@ -1235,6 +1289,10 @@ impl Stream for Handler {
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let pin = self.get_mut();
 
+        if pin.terminated {
+            return Poll::Ready(None);
+        }
+
         loop {
             let now = Instant::now();
             // temporary pinning of the browser receiver should be safe as we are pinning
@@ -1347,7 +1405,11 @@ impl Stream for Handler {
                                     target.goto_frame(
                                         session_id.clone(),
                                         frame_id,
-                                        FrameNavigationRequest::new(navigation_id, req),
+                                        FrameNavigationRequest::with_timeout(
+                                            navigation_id,
+                                            req,
+                                            pin.config.request_timeout,
+                                        ),
                                     );
                                     pin.navigations.insert(
                                         navigation_id,
@@ -1438,7 +1500,8 @@ impl Stream for Handler {
                 match Pin::new(&mut pin.conn).poll_next(cx) {
                     Poll::Pending => break,
                     Poll::Ready(None) => {
-                        pin.fail_all_pending_on_connection_close();
+                        tracing::debug!("WS connection closed");
+                        pin.terminate();
                         return Poll::Ready(None);
                     }
                     Poll::Ready(Some(ev)) => {
@@ -1447,7 +1510,7 @@ impl Stream for Handler {
                             Ok(Message::Response(resp)) => {
                                 pin.on_response(resp);
                                 if pin.closing {
-                                    pin.fail_all_pending_on_connection_close();
+                                    pin.terminate();
                                     return Poll::Ready(None);
                                 }
                             }
@@ -1462,8 +1525,16 @@ impl Stream for Handler {
                                 }
                             }
                             Err(err) => {
-                                tracing::error!("WS Connection error: {:?}", err);
-                                pin.fail_all_pending_on_connection_close();
+                                pin.terminate();
+                                if pin.close_requested {
+                                    // `Browser.close` makes the browser drop the
+                                    // socket, often without a closing handshake.
+                                    tracing::debug!("WS connection ended while closing: {err}");
+                                    return Poll::Ready(None);
+                                }
+                                // The error is returned to the caller; a
+                                // second report at error level is noise.
+                                tracing::debug!("WS connection error: {err:?}");
                                 return Poll::Ready(Some(Err(err)));
                             }
                         }
@@ -2472,7 +2543,7 @@ mod tests {
         handler.fail_pending_for_target(&target_id, Some(&main_session));
         assert!(matches!(
             target_rx.await.expect("target teardown sender resolves"),
-            Err(CdpError::NoResponse)
+            Err(CdpError::TargetClosed)
         ));
 
         let (connection_tx, connection_rx) = oneshot::channel();
@@ -3098,7 +3169,7 @@ mod tests {
 
         assert!(matches!(
             rx.await.expect("navigation sender remains live"),
-            Err(CdpError::NoResponse)
+            Err(CdpError::TargetClosed)
         ));
         assert!(!handler.targets.contains_key(&target_id));
         assert!(handler.pending_commands.is_empty());
@@ -3138,7 +3209,7 @@ mod tests {
 
         assert!(matches!(
             rx.await.expect("navigation sender remains live"),
-            Err(CdpError::NoResponse)
+            Err(CdpError::TargetClosed)
         ));
         assert!(handler.navigations.is_empty());
     }
@@ -3169,10 +3240,10 @@ mod tests {
                 .expect("wait sender is settled, not cancelled"),
             Err(crate::handler::frame::FrameWaitError::FrameSwappedOrDetached)
         ));
-        assert!(matches!(page_wait.await, Err(CdpError::FrameNotReady)));
+        assert!(matches!(page_wait.await, Err(CdpError::TargetClosed)));
         assert!(matches!(
             initiator_rx.await.expect("initiator sender is settled"),
-            Err(CdpError::NoResponse)
+            Err(CdpError::TargetClosed)
         ));
         assert!(!handler.targets.contains_key(&target_id));
     }
@@ -3200,10 +3271,10 @@ mod tests {
                 .expect("wait sender is settled, not cancelled"),
             Err(crate::handler::frame::FrameWaitError::FrameSwappedOrDetached)
         ));
-        assert!(matches!(page_wait.await, Err(CdpError::FrameNotReady)));
+        assert!(matches!(page_wait.await, Err(CdpError::TargetClosed)));
         assert!(matches!(
             initiator_rx.await.expect("initiator sender is settled"),
-            Err(CdpError::NoResponse)
+            Err(CdpError::TargetClosed)
         ));
         assert!(!handler.targets.contains_key(&target_id));
     }
@@ -3236,10 +3307,10 @@ mod tests {
                 .expect("wait sender is settled, not cancelled"),
             Err(crate::handler::frame::FrameWaitError::FrameSwappedOrDetached)
         ));
-        assert!(matches!(page_wait.await, Err(CdpError::FrameNotReady)));
+        assert!(matches!(page_wait.await, Err(CdpError::TargetClosed)));
         assert!(matches!(
             initiator_rx.await.expect("initiator sender is settled"),
-            Err(CdpError::NoResponse)
+            Err(CdpError::TargetClosed)
         ));
     }
 
@@ -3284,7 +3355,7 @@ mod tests {
             initiator_rx
                 .await
                 .expect("whole-target teardown settles initiator"),
-            Err(CdpError::NoResponse)
+            Err(CdpError::TargetClosed)
         ));
     }
 
@@ -3314,7 +3385,7 @@ mod tests {
 
         assert!(matches!(
             rx.await.expect("command sender remains live"),
-            Err(CdpError::NoResponse)
+            Err(CdpError::TargetClosed)
         ));
         assert!(handler.sessions.is_empty());
     }
@@ -3397,6 +3468,71 @@ mod tests {
             ack_rx.await.expect("ack sender remains live"),
             Err(CdpError::NoResponse)
         ));
+    }
+
+    /// mattsse/chromiumoxide#65: once the connection is gone the handler
+    /// stays finished, and requests queued for it fail instead of hanging.
+    #[tokio::test]
+    async fn connection_close_terminates_the_handler_and_settles_requests() {
+        let (mut handler, mut tx, close) = test_handler_with_sender().await;
+        let (command_tx, command_rx) = oneshot::channel();
+        tx.send(HandlerMessage::Command(
+            CommandMessage::new(GetVersionParams::default(), command_tx)
+                .expect("command serializes"),
+        ))
+        .await
+        .expect("handler accepts the command");
+
+        close.send(()).expect("close test websocket");
+        let next = tokio::time::timeout(Duration::from_secs(2), handler.next())
+            .await
+            .expect("handler observes websocket EOF");
+        assert!(next.is_none());
+        assert!(matches!(
+            command_rx.await.expect("command sender is settled"),
+            Err(CdpError::NoResponse)
+        ));
+
+        // Later polls finish immediately and later requests are refused.
+        assert!(handler.next().await.is_none());
+        let (late_tx, _late_rx) = oneshot::channel();
+        assert!(
+            tx.send(HandlerMessage::GetPages(late_tx)).await.is_err(),
+            "a terminated handler no longer accepts requests"
+        );
+    }
+
+    /// mattsse/chromiumoxide#287: `Browser::close` succeeds when the browser
+    /// drops the connection before answering.
+    #[tokio::test]
+    async fn pending_close_succeeds_when_the_connection_drops() {
+        let (mut handler, close) = test_handler().await;
+        let (close_tx, close_rx) = oneshot::channel();
+        handler.submit_close(close_tx, Instant::now());
+
+        close.send(()).expect("close test websocket");
+        let next = tokio::time::timeout(Duration::from_secs(2), handler.next())
+            .await
+            .expect("handler observes websocket EOF");
+        assert!(next.is_none());
+        assert!(close_rx.await.expect("close sender is settled").is_ok());
+    }
+
+    /// A transport error after `Browser.close` was sent is the expected end
+    /// of the connection, not an error for the caller.
+    #[tokio::test]
+    async fn transport_error_while_closing_ends_the_handler_quietly() {
+        let (mut handler, _release) =
+            test_handler_with_message(WsMessage::Binary(vec![1, 2, 3].into())).await;
+        let (close_tx, close_rx) = oneshot::channel();
+        handler.submit_close(close_tx, Instant::now());
+
+        let next = tokio::time::timeout(Duration::from_secs(2), handler.next())
+            .await
+            .expect("handler observes the transport error");
+        assert!(next.is_none());
+        assert!(close_rx.await.expect("close sender is settled").is_ok());
+        assert!(handler.next().await.is_none());
     }
 
     #[tokio::test]

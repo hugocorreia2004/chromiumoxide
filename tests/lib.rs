@@ -8,6 +8,7 @@ mod compatibility;
 mod config;
 mod oopif;
 mod page;
+mod robustness;
 mod stealth;
 
 pub async fn test<T>(test: T)

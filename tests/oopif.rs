@@ -805,10 +805,16 @@ async fn frame_api_supports_nested_oopif_navigation_and_stale_handles() {
         main_navigation
             .expect("checked above")
             .expect("main navigation succeeds");
-        assert!(
-            server.nested_served(),
-            "page navigation returned before the delayed nested OOP document loaded"
-        );
+        // `goto` resolves on the main frame's own `load`, which the browser
+        // does not delay for out-of-process descendants: the delayed nested
+        // OOP document arrives on its own.
+        tokio::time::timeout(FRAME_TIMEOUT, async {
+            while !server.nested_served() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the delayed nested OOP document is served");
 
         let main = page
             .main_frame()

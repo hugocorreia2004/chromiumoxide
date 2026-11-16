@@ -14,7 +14,7 @@ use chromiumoxide_types::{Command, CommandResponse, Method, Request};
 
 use crate::cmd::{CommandMessage, to_command_response};
 use crate::element::{Element, remote_object_ids_for_exception};
-use crate::error::{CdpError, Result};
+use crate::error::{CdpError, Result, TargetChannelResult};
 use crate::handler::PageInner;
 use crate::handler::domworld::DOMWorldKind;
 use crate::handler::frame::FrameWaitError;
@@ -153,7 +153,8 @@ impl Frame {
                 expected_session_id: self.inner.session_id.clone(),
                 command,
             })
-            .await?;
+            .await
+            .or_target_closed()?;
         let response = rx.await??;
         to_command_response::<T>(response, method)
     }
@@ -243,7 +244,8 @@ impl Frame {
                 req: request,
                 tx,
             })
-            .await?;
+            .await
+            .or_target_closed()?;
         let response = rx.await??;
         Ok(to_command_response::<NavigateParams>(response, method)?.result)
     }
@@ -260,7 +262,8 @@ impl Frame {
                 session_id: self.inner.session_id.clone(),
                 tx,
             })
-            .await?;
+            .await
+            .or_target_closed()?;
         match rx.await? {
             Ok(()) => Ok(()),
             Err(FrameWaitError::Timeout) => Err(CdpError::Timeout),
@@ -302,7 +305,8 @@ impl Frame {
                 expected_session_id: self.inner.session_id.clone(),
                 tx,
             })
-            .await?;
+            .await
+            .or_target_closed()?;
         let context = rx.await??.ok_or(CdpError::FrameNotReady)?;
         if context.session_id != self.inner.session_id {
             return Err(CdpError::FrameNotReady);

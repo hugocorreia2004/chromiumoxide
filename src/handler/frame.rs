@@ -29,6 +29,8 @@ use crate::{ArcHttpRequest, cmd::CommandChain};
 
 pub const UTILITY_WORLD_NAME: &str = "__chromiumoxide_utility_world__";
 pub(crate) const HTTP_RESPONSE_CODE_FAILURE: &str = "net::ERR_HTTP_RESPONSE_CODE_FAILURE";
+/// Reported when a frame stops loading before the navigated document commits.
+pub(crate) const NAVIGATION_ABORTED: &str = "net::ERR_ABORTED";
 const EVALUATION_SCRIPT_URL: &str = "____chromiumoxide_utility_world___evaluation_script__";
 
 /// Represents a frame on the page
@@ -454,14 +456,37 @@ impl FrameManager {
     }
 
     fn check_lifecycle(&self, watcher: &NavigationWatcher, frame: &Frame) -> bool {
-        watcher.expected_lifecycle.iter().all(|ev| {
-            frame.lifecycle_events.contains(ev)
-                || (frame.url.is_none() && frame.lifecycle_events.contains("DOMContentLoaded"))
-        }) && frame
+        watcher
+            .expected_lifecycle
+            .iter()
+            .all(|event| self.frame_reached_lifecycle(frame, event))
+    }
+
+    /// Whether `frame` fired the lifecycle `event` for its current document.
+    ///
+    /// The browser's own `load` and `DOMContentLoaded` already wait for the
+    /// subframes that block them, so only the frame itself is checked: a
+    /// subframe that is attached later, lazy, or never finishes (ads,
+    /// trackers) must not hold the navigation back. The network idle events
+    /// are per frame, so they are required from every subframe that has
+    /// started loading.
+    pub(crate) fn frame_reached_lifecycle(&self, frame: &Frame, event: &str) -> bool {
+        let own = frame.lifecycle_events.contains(event)
+            || (frame.url.is_none() && frame.lifecycle_events.contains("DOMContentLoaded"));
+        if !own {
+            return false;
+        }
+        if event == LifecycleEvent::Load.as_ref()
+            || event == LifecycleEvent::DomcontentLoaded.as_ref()
+        {
+            return true;
+        }
+        frame
             .child_frames
             .iter()
-            .filter_map(|f| self.frames.get(f))
-            .all(|f| self.check_lifecycle(watcher, f))
+            .filter_map(|child| self.frames.get(child))
+            .filter(|child| !child.lifecycle_events.is_empty())
+            .all(|child| self.frame_reached_lifecycle(child, event))
     }
 
     fn check_lifecycle_complete(
@@ -503,6 +528,7 @@ impl FrameManager {
             Timeout(Instant),
             FrameMissing(FrameId),
             Complete(NavigationCompletion),
+            Failed(String),
         }
 
         let navigation_keys = self.navigation.keys().cloned().collect::<Vec<_>>();
@@ -513,6 +539,12 @@ impl FrameManager {
             };
             let outcome = if now > entry.deadline {
                 Some(ScanOutcome::Timeout(entry.deadline))
+            } else if let Some(error_text) = entry
+                .watcher
+                .as_ref()
+                .and_then(|watcher| watcher.failure.clone())
+            {
+                Some(ScanOutcome::Failed(error_text))
             } else if let Some(watcher) = entry.watcher.as_ref() {
                 match self.frames.get(&watcher.frame_id) {
                     Some(frame) => self
@@ -562,6 +594,18 @@ impl FrameManager {
                                     id,
                                     frame: frame_id,
                                 },
+                            )));
+                    }
+                }
+                ScanOutcome::Failed(error_text) => {
+                    for waiter in entry.waiters {
+                        let _ =
+                            waiter.send(Err(FrameWaitError::NavigationFailed(error_text.clone())));
+                    }
+                    if let Some(id) = entry.watcher.and_then(|watcher| watcher.id) {
+                        self.queued_events
+                            .push_back(FrameEvent::NavigationResult(Err(
+                                NavigationError::Failed { id, error_text },
                             )));
                     }
                 }
@@ -1113,12 +1157,78 @@ impl FrameManager {
         event: &EventFrameStoppedLoading,
         session_id: Option<&SessionId>,
     ) {
-        if let Some(frame) = self.frames.get_mut(&event.frame_id) {
-            if session_id
-                .map(|session_id| frame.session_id() == Some(session_id))
-                .unwrap_or(true)
+        let Some(frame) = self.frames.get_mut(&event.frame_id) else {
+            return;
+        };
+        if !session_id
+            .map(|session_id| frame.session_id() == Some(session_id))
+            .unwrap_or(true)
+        {
+            return;
+        }
+        frame.on_loading_stopped();
+        let current_loader = frame.loader_id.clone();
+
+        // The frame stopped loading without committing the document the
+        // browser announced for a navigation: the navigation was aborted
+        // (blocked, cancelled, or turned into a download).
+        let key = (session_id.cloned(), event.frame_id.clone());
+        if let Some(watcher) = self
+            .navigation
+            .get_mut(&key)
+            .and_then(|entry| entry.watcher.as_mut())
+        {
+            if watcher.failure.is_none()
+                && watcher
+                    .expected_loader_id
+                    .as_ref()
+                    .is_some_and(|expected| current_loader.as_ref() != Some(expected))
             {
-                frame.on_loading_stopped();
+                watcher.failure = Some(NAVIGATION_ABORTED.to_owned());
+            }
+        }
+    }
+
+    /// The browser answered a `Page.navigate` with the loader of the document
+    /// it is about to commit. Knowing it lets a failure of that document's
+    /// request, or a stop without commit, end the navigation.
+    pub(crate) fn on_navigation_response(
+        &mut self,
+        navigation_id: NavigationId,
+        loader_id: Option<LoaderId>,
+    ) {
+        if let Some(watcher) = self
+            .navigation
+            .values_mut()
+            .filter_map(|entry| entry.watcher.as_mut())
+            .find(|watcher| watcher.id == Some(navigation_id))
+        {
+            watcher.expected_loader_id = loader_id;
+        }
+    }
+
+    /// `Network.loadingFailed`: when the failed request is the document
+    /// request of a pending navigation (its id is the new document's loader
+    /// id), the navigation fails with the network error.
+    pub(crate) fn on_request_failed(
+        &mut self,
+        session_id: Option<&SessionId>,
+        request_id: &str,
+        error_text: &str,
+    ) {
+        for ((key_session, _), entry) in self.navigation.iter_mut() {
+            if session_id.is_some() && key_session.as_ref() != session_id {
+                continue;
+            }
+            if let Some(watcher) = entry.watcher.as_mut() {
+                if watcher.failure.is_none()
+                    && watcher
+                        .expected_loader_id
+                        .as_ref()
+                        .is_some_and(|expected| expected.as_ref() == request_id)
+                {
+                    watcher.failure = Some(error_text.to_owned());
+                }
             }
         }
     }
@@ -1777,6 +1887,12 @@ pub enum NavigationError {
         id: NavigationId,
         frame: FrameId,
     },
+    /// The navigation request failed or the frame stopped loading before the
+    /// new document committed.
+    Failed {
+        id: NavigationId,
+        error_text: String,
+    },
 }
 
 impl NavigationError {
@@ -1784,6 +1900,7 @@ impl NavigationError {
         match self {
             NavigationError::Timeout { id, .. } => id,
             NavigationError::FrameNotFound { id, .. } => id,
+            NavigationError::Failed { id, .. } => id,
         }
     }
 }
@@ -1817,6 +1934,11 @@ pub struct NavigationWatcher {
     /// navigating to a new document by checking if a loader was included in the
     /// response.
     same_document_navigation: bool,
+    /// Loader of the document the browser announced in its `Page.navigate`
+    /// response. A failure of the request with this id fails the navigation.
+    expected_loader_id: Option<LoaderId>,
+    /// Set once the navigation is known to have failed.
+    failure: Option<String>,
 }
 
 impl NavigationWatcher {
@@ -1835,6 +1957,8 @@ impl NavigationWatcher {
             loader_id,
             frame_id: frame,
             same_document_navigation: false,
+            expected_loader_id: None,
+            failure: None,
         }
     }
 
@@ -2142,6 +2266,190 @@ mod tests {
         EventExecutionContextDestroyed {
             execution_context_unique_id: unique_id.to_owned(),
         }
+    }
+
+    fn lifecycle(frame_id: &str, loader_id: &str, name: &str) -> EventLifecycleEvent {
+        EventLifecycleEvent {
+            frame_id: FrameId::new(frame_id),
+            loader_id: LoaderId::new(loader_id),
+            name: name.to_owned(),
+            timestamp: chromiumoxide_cdp::cdp::browser_protocol::network::MonotonicTime::new(0.),
+        }
+    }
+
+    /// Start navigation `id` of the main frame and answer its `Page.navigate`
+    /// with the loader of the new document.
+    fn start_main_navigation(
+        manager: &mut FrameManager,
+        main_session: &SessionId,
+        main_frame_id: &FrameId,
+        id: usize,
+        new_loader: &str,
+    ) {
+        manager.navigate_frame_in_session(
+            main_session.clone(),
+            main_frame_id.clone(),
+            navigation_request(id),
+        );
+        assert!(matches!(
+            manager.poll(Instant::now()),
+            Some(FrameEvent::NavigationRequest(_, _))
+        ));
+        manager.on_navigation_response(NavigationId(id), Some(LoaderId::new(new_loader)));
+        manager.on_frame_started_loading_in_session(
+            &EventFrameStartedLoading {
+                frame_id: main_frame_id.clone(),
+            },
+            main_session.clone(),
+        );
+    }
+
+    /// mattsse/chromiumoxide#191: the main frame's `load` completes the
+    /// navigation even when a subframe never finishes loading.
+    #[test]
+    fn main_frame_load_completes_navigation_despite_a_loading_subframe() {
+        let (mut manager, main_session, main_frame_id) = manager_with_main();
+        add_child(&mut manager, "ad-frame", "main-frame", &main_session);
+        start_main_navigation(
+            &mut manager,
+            &main_session,
+            &main_frame_id,
+            31,
+            "new-loader",
+        );
+
+        manager.on_page_lifecycle_event_in_session(
+            &lifecycle("main-frame", "new-loader", "init"),
+            main_session.clone(),
+        );
+        // A late subframe starts loading and never finishes.
+        manager.on_frame_started_loading_in_session(
+            &EventFrameStartedLoading {
+                frame_id: FrameId::new("ad-frame"),
+            },
+            main_session.clone(),
+        );
+        manager.on_page_lifecycle_event_in_session(
+            &lifecycle("ad-frame", "ad-loader-2", "init"),
+            main_session.clone(),
+        );
+        manager.on_page_lifecycle_event_in_session(
+            &lifecycle("main-frame", "new-loader", "load"),
+            main_session.clone(),
+        );
+
+        assert!(matches!(
+            manager.poll(Instant::now()),
+            Some(FrameEvent::NavigationResult(Ok(
+                NavigationOk::NewDocumentNavigation(NavigationId(31))
+            )))
+        ));
+    }
+
+    #[test]
+    fn network_idle_waits_for_loading_subframes() {
+        let (mut manager, main_session, main_frame_id) = manager_with_main();
+        add_child(&mut manager, "child", "main-frame", &main_session);
+        let main = manager.frames.get_mut(&main_frame_id).expect("main frame");
+        main.lifecycle_events.insert("networkIdle".into());
+        let idle = LifecycleEvent::NetworkIdle.as_ref();
+        let main = manager.frame(&main_frame_id).expect("main frame");
+        // The child has lifecycle events but no networkIdle yet.
+        assert!(!manager.frame_reached_lifecycle(main, idle));
+        assert!(manager.frame_reached_lifecycle(main, LifecycleEvent::Load.as_ref()));
+
+        manager
+            .frames
+            .get_mut(&FrameId::new("child"))
+            .expect("child frame")
+            .lifecycle_events
+            .insert("networkIdle".into());
+        let main = manager.frame(&main_frame_id).expect("main frame");
+        assert!(manager.frame_reached_lifecycle(main, idle));
+    }
+
+    /// mattsse/chromiumoxide#125: a navigation whose document request fails
+    /// ends with the network error instead of waiting for a load that never
+    /// comes.
+    #[test]
+    fn failed_document_request_fails_the_navigation() {
+        let (mut manager, main_session, main_frame_id) = manager_with_main();
+        start_main_navigation(
+            &mut manager,
+            &main_session,
+            &main_frame_id,
+            32,
+            "doc-request",
+        );
+        let (tx, rx) = oneshot::channel();
+        manager.wait_for_navigation(main_session.clone(), main_frame_id.clone(), tx);
+
+        // Another request failing does not matter.
+        manager.on_request_failed(Some(&main_session), "image-request", "net::ERR_FAILED");
+        assert!(manager.poll(Instant::now()).is_none());
+
+        manager.on_request_failed(Some(&main_session), "doc-request", "net::ERR_ABORTED");
+        assert!(matches!(
+            manager.poll(Instant::now()),
+            Some(FrameEvent::NavigationResult(Err(NavigationError::Failed {
+                id: NavigationId(32),
+                ref error_text,
+            }))) if error_text == "net::ERR_ABORTED"
+        ));
+        assert_eq!(
+            block_on(rx).expect("waiter is settled"),
+            Err(FrameWaitError::NavigationFailed(
+                "net::ERR_ABORTED".to_owned()
+            ))
+        );
+    }
+
+    #[test]
+    fn stopped_loading_without_commit_aborts_the_navigation() {
+        let (mut manager, main_session, main_frame_id) = manager_with_main();
+        start_main_navigation(
+            &mut manager,
+            &main_session,
+            &main_frame_id,
+            33,
+            "never-commits",
+        );
+
+        manager.on_frame_stopped_loading_in_session(
+            &EventFrameStoppedLoading {
+                frame_id: main_frame_id.clone(),
+            },
+            main_session.clone(),
+        );
+        assert!(matches!(
+            manager.poll(Instant::now()),
+            Some(FrameEvent::NavigationResult(Err(NavigationError::Failed {
+                id: NavigationId(33),
+                ..
+            })))
+        ));
+    }
+
+    #[test]
+    fn stopped_loading_after_commit_completes_the_navigation() {
+        let (mut manager, main_session, main_frame_id) = manager_with_main();
+        start_main_navigation(&mut manager, &main_session, &main_frame_id, 34, "commits");
+        manager.on_page_lifecycle_event_in_session(
+            &lifecycle("main-frame", "commits", "init"),
+            main_session.clone(),
+        );
+        manager.on_frame_stopped_loading_in_session(
+            &EventFrameStoppedLoading {
+                frame_id: main_frame_id.clone(),
+            },
+            main_session.clone(),
+        );
+        assert!(matches!(
+            manager.poll(Instant::now()),
+            Some(FrameEvent::NavigationResult(Ok(
+                NavigationOk::NewDocumentNavigation(NavigationId(34))
+            )))
+        ));
     }
 
     #[test]

@@ -62,7 +62,10 @@ fn unknown_enum_values_do_not_fail_the_payload() {
     );
     assert_eq!(frame.gated_api_features.len(), 2);
     assert_eq!(
-        frame.ad_frame_status.expect("ad frame status").ad_frame_type,
+        frame
+            .ad_frame_status
+            .expect("ad frame status")
+            .ad_frame_type,
         AdFrameType::default()
     );
 }
@@ -93,7 +96,10 @@ fn well_formed_event_params_stay_typed() {
         "params": { "frameId": "main" }
     }))
     .expect("event parses");
-    assert!(matches!(message.params, CdpEvent::PageFrameStoppedLoading(_)));
+    assert!(matches!(
+        message.params,
+        CdpEvent::PageFrameStoppedLoading(_)
+    ));
 }
 
 /// mattsse/chromiumoxide#293: a mandatory array is serialized even when it

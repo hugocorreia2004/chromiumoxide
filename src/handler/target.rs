@@ -14,6 +14,7 @@ use chromiumoxide_cdp::cdp::CdpEventMessage;
 use chromiumoxide_cdp::cdp::browser_protocol::fetch::{
     self, ContinueRequestParams, RequestPattern,
 };
+use chromiumoxide_cdp::cdp::browser_protocol::network::LoaderId;
 #[allow(deprecated)]
 use chromiumoxide_cdp::cdp::browser_protocol::network::{
     EmulateNetworkConditionsParams, Headers, SetCacheDisabledParams, SetExtraHttpHeadersParams,
@@ -175,6 +176,14 @@ pub struct Target {
     wait_for_navigation_results: Vec<Sender<Result<ArcHttpRequest>>>,
     /// The sender who requested the page.
     initiator: Option<Sender<Result<Page>>>,
+    /// After this instant the page is handed to its initiator even if the
+    /// main frame never finished loading, so `Browser::new_page` cannot hang
+    /// on a document that never fires `load`.
+    initiator_deadline: Option<Instant>,
+    /// Page-facing waiters for a lifecycle event of the main frame.
+    lifecycle_waiters: Vec<(MethodId, Sender<Result<ArcHttpRequest>>)>,
+    /// Notified once this target is torn down.
+    close_waiters: Vec<Sender<()>>,
 }
 
 impl Target {
@@ -208,6 +217,9 @@ impl Target {
             paused_request_sink: None,
             page_exposed: false,
             initiator: None,
+            initiator_deadline: None,
+            lifecycle_waiters: Vec::new(),
+            close_waiters: Vec::new(),
             browser_context,
         }
     }
@@ -269,6 +281,16 @@ impl Target {
     ) {
         self.frame_manager
             .navigate_frame_in_session(session_id, frame_id, req);
+    }
+
+    /// The `Page.navigate` of a navigation was answered without an error.
+    pub(crate) fn on_navigation_response(
+        &mut self,
+        navigation_id: NavigationId,
+        loader_id: Option<LoaderId>,
+    ) {
+        self.frame_manager
+            .on_navigation_response(navigation_id, loader_id);
     }
 
     pub(crate) fn on_navigation_failed(&mut self, navigation_id: NavigationId, error_text: String) {
@@ -994,23 +1016,23 @@ impl Target {
                 TargetEvent::NavigationRequest(_, _) => {}
                 TargetEvent::NavigationResult(_) => {}
                 TargetEvent::Command(command) => {
-                    let _ = command.sender.send(Err(CdpError::NoResponse));
+                    let _ = command.sender.send(Err(CdpError::TargetClosed));
                 }
                 TargetEvent::RegisterChildSession(_) => {}
                 TargetEvent::UnregisterChildSession(_) => {}
                 TargetEvent::SessionDraining(_) => {}
                 TargetEvent::FrameNavigate { tx, .. } => {
-                    let _ = tx.send(Err(CdpError::NoResponse));
+                    let _ = tx.send(Err(CdpError::TargetClosed));
                 }
                 TargetEvent::FrameWaitForNavigation { tx, .. } => {
                     let _ = tx.send(Err(FrameWaitError::FrameSwappedOrDetached));
                 }
                 TargetEvent::QueuePreloadScript { .. } => {}
                 TargetEvent::AddPreloadScript { tx, .. } => {
-                    let _ = tx.send(Err(CdpError::NoResponse));
+                    let _ = tx.send(Err(CdpError::TargetClosed));
                 }
                 TargetEvent::FanOutAckBatch(batch) => {
-                    let _ = batch.ack_tx.send(Err(CdpError::NoResponse));
+                    let _ = batch.ack_tx.send(Err(CdpError::TargetClosed));
                 }
             }
         }
@@ -1019,7 +1041,7 @@ impl Target {
     fn settle_target_message_on_teardown(message: TargetMessage) {
         match message {
             TargetMessage::Command(command) => {
-                let _ = command.sender.send(Err(CdpError::NoResponse));
+                let _ = command.sender.send(Err(CdpError::TargetClosed));
             }
             TargetMessage::MainFrame(tx) => {
                 let _ = tx.send(None);
@@ -1051,45 +1073,49 @@ impl Target {
         match message {
             InternalTargetMessage::FrameCommand { command, .. }
             | InternalTargetMessage::SessionCommand { command, .. } => {
-                let _ = command.sender.send(Err(CdpError::NoResponse));
+                let _ = command.sender.send(Err(CdpError::TargetClosed));
             }
             InternalTargetMessage::FrameNavigate { tx, .. } => {
-                let _ = tx.send(Err(CdpError::NoResponse));
+                let _ = tx.send(Err(CdpError::TargetClosed));
             }
             InternalTargetMessage::FrameWaitForNavigation { tx, .. } => {
                 let _ = tx.send(Err(FrameWaitError::FrameSwappedOrDetached));
             }
-            InternalTargetMessage::WaitForNavigationResult { tx } => {
-                let _ = tx.send(Err(CdpError::FrameNotReady));
+            InternalTargetMessage::WaitForNavigationResult { tx }
+            | InternalTargetMessage::WaitForLifecycle { tx, .. } => {
+                let _ = tx.send(Err(CdpError::TargetClosed));
+            }
+            InternalTargetMessage::WaitForClose { tx } => {
+                let _ = tx.send(());
             }
             InternalTargetMessage::GetPinnedExecutionContext { tx, .. } => {
-                let _ = tx.send(Err(CdpError::NoResponse));
+                let _ = tx.send(Err(CdpError::TargetClosed));
             }
             InternalTargetMessage::GetFrameInfo { tx, .. } => {
-                let _ = tx.send(Err(CdpError::NoResponse));
+                let _ = tx.send(Err(CdpError::TargetClosed));
             }
             InternalTargetMessage::GetAllFrames { tx } => {
                 let _ = tx.send(Vec::new());
             }
             InternalTargetMessage::GetFrameBoundaryChain { tx, .. } => {
-                let _ = tx.send(Err(CdpError::NoResponse));
+                let _ = tx.send(Err(CdpError::TargetClosed));
             }
             InternalTargetMessage::RegisterPausedRequestStream { tx, .. } => {
                 // The event and command side channels close when this message
                 // is dropped after its acknowledgement is settled.
-                let _ = tx.send(Err(CdpError::NoResponse));
+                let _ = tx.send(Err(CdpError::TargetClosed));
             }
             InternalTargetMessage::AddPreloadScript { tx, .. } => {
-                let _ = tx.send(Err(CdpError::NoResponse));
+                let _ = tx.send(Err(CdpError::TargetClosed));
             }
             InternalTargetMessage::RegisterEventListener { tx, .. } => {
-                let _ = tx.send(Err(CdpError::NoResponse));
+                let _ = tx.send(Err(CdpError::TargetClosed));
             }
             InternalTargetMessage::SetCredentials { tx, .. } => {
-                let _ = tx.send(Err(CdpError::NoResponse));
+                let _ = tx.send(Err(CdpError::TargetClosed));
             }
             InternalTargetMessage::SetRequestInterception { tx, .. } => {
-                let _ = tx.send(Err(CdpError::NoResponse));
+                let _ = tx.send(Err(CdpError::TargetClosed));
             }
         }
     }
@@ -1115,11 +1141,17 @@ impl Target {
             let _ = tx.send(None);
         }
         for tx in mem::take(&mut self.wait_for_navigation_results) {
-            let _ = tx.send(Err(CdpError::FrameNotReady));
+            let _ = tx.send(Err(CdpError::TargetClosed));
+        }
+        for (_, tx) in mem::take(&mut self.lifecycle_waiters) {
+            let _ = tx.send(Err(CdpError::TargetClosed));
         }
         self.frame_manager.clear_isolated_world_registrations();
         if let Some(initiator) = self.initiator.take() {
-            let _ = initiator.send(Err(CdpError::NoResponse));
+            let _ = initiator.send(Err(CdpError::TargetClosed));
+        }
+        for tx in mem::take(&mut self.close_waiters) {
+            let _ = tx.send(());
         }
     }
 
@@ -1435,6 +1467,11 @@ impl Target {
                 self.network_manager.on_network_loading_finished(ev)
             }
             CdpEvent::NetworkLoadingFailed(ev) => {
+                self.frame_manager.on_request_failed(
+                    event_session_id.as_ref(),
+                    ev.request_id.as_ref(),
+                    &ev.error_text,
+                );
                 self.network_manager.on_network_loading_failed(ev)
             }
             // This matches Chrome's full `CdpEvent` set (not the internal
@@ -1566,13 +1603,23 @@ impl Target {
             }
             TargetInit::Initialized => {
                 if let Some(initiator) = self.initiator.take() {
-                    // make sure that the main frame of the page has finished loading
-                    if self
+                    // make sure that the main frame of the page has finished
+                    // loading, or that it had its configured time to do so
+                    let loaded = self
                         .frame_manager
                         .main_frame()
                         .map(|frame| frame.is_loaded())
-                        .unwrap_or_default()
-                    {
+                        .unwrap_or_default();
+                    let expired = self
+                        .initiator_deadline
+                        .is_some_and(|deadline| now > deadline);
+                    if expired && !loaded {
+                        tracing::debug!(
+                            target_id = ?self.target_id(),
+                            "main frame did not finish loading in time; handing the page over"
+                        );
+                    }
+                    if loaded || expired {
                         if let Some(page) = self.get_or_create_page() {
                             let page = Page::from(page.clone());
                             let delivered = initiator.send(Ok(page)).is_ok();
@@ -1595,6 +1642,18 @@ impl Target {
                     }
                     while let Some(tx) = self.wait_for_navigation_results.pop() {
                         let _ = tx.send(Ok(frame.http_request().cloned()));
+                    }
+                }
+                if !self.lifecycle_waiters.is_empty() {
+                    for (event, tx) in mem::take(&mut self.lifecycle_waiters) {
+                        if tx.is_canceled() {
+                            continue;
+                        }
+                        if self.frame_manager.frame_reached_lifecycle(frame, &event) {
+                            let _ = tx.send(Ok(frame.http_request().cloned()));
+                        } else {
+                            self.lifecycle_waiters.push((event, tx));
+                        }
                     }
                 }
             }
@@ -1783,6 +1842,12 @@ impl Target {
                                 tx,
                             });
                     }
+                    InternalTargetMessage::WaitForLifecycle { event, tx } => {
+                        self.lifecycle_waiters.push((event, tx));
+                    }
+                    InternalTargetMessage::WaitForClose { tx } => {
+                        self.close_waiters.push(tx);
+                    }
                     InternalTargetMessage::WaitForNavigationResult { tx } => {
                         if let Some(frame) = self.frame_manager.main_frame() {
                             if frame.is_loaded() {
@@ -1931,6 +1996,7 @@ impl Target {
     /// target
     pub fn set_initiator(&mut self, tx: Sender<Result<Page>>) {
         self.initiator = Some(tx);
+        self.initiator_deadline = Some(Instant::now() + self.config.request_timeout);
     }
 
     pub(crate) fn page_init_commands(timeout: Duration) -> CommandChain {
@@ -2161,6 +2227,15 @@ pub(crate) enum InternalTargetMessage {
     },
     WaitForNavigationResult {
         tx: Sender<Result<ArcHttpRequest>>,
+    },
+    /// Resolve once the main frame fired `event` for its current document.
+    WaitForLifecycle {
+        event: MethodId,
+        tx: Sender<Result<ArcHttpRequest>>,
+    },
+    /// Resolve once this target is torn down.
+    WaitForClose {
+        tx: Sender<()>,
     },
     GetPinnedExecutionContext {
         dom_world: DOMWorldKind,
@@ -4549,10 +4624,10 @@ mod tests {
 
         target.settle_whole_target_teardown();
 
-        assert!(matches!(block_on(wait), Err(CdpError::FrameNotReady)));
+        assert!(matches!(block_on(wait), Err(CdpError::TargetClosed)));
         assert!(matches!(
             block_on(command_rx).expect("command sender resolves"),
-            Err(CdpError::NoResponse)
+            Err(CdpError::TargetClosed)
         ));
         assert!(
             block_on(legacy_rx)
@@ -4561,11 +4636,11 @@ mod tests {
         );
         assert!(matches!(
             block_on(promoted_rx).expect("promoted waiter resolves"),
-            Err(CdpError::FrameNotReady)
+            Err(CdpError::TargetClosed)
         ));
         assert!(matches!(
             block_on(initiator_rx).expect("initiator resolves"),
-            Err(CdpError::NoResponse)
+            Err(CdpError::TargetClosed)
         ));
         assert_eq!(
             target
@@ -4626,7 +4701,7 @@ mod tests {
         assert_eq!(target.wait_for_navigation_results.len(), 1);
 
         target.settle_whole_target_teardown();
-        assert!(matches!(block_on(page_wait), Err(CdpError::FrameNotReady)));
+        assert!(matches!(block_on(page_wait), Err(CdpError::TargetClosed)));
 
         let (mut target, _) = initialized_target();
         let page = target
@@ -4657,10 +4732,7 @@ mod tests {
         assert_eq!(target.wait_for_navigation_results.len(), 1);
 
         target.settle_whole_target_teardown();
-        assert!(matches!(
-            block_on(http_future),
-            Err(CdpError::FrameNotReady)
-        ));
+        assert!(matches!(block_on(http_future), Err(CdpError::TargetClosed)));
     }
 
     #[test]
@@ -4959,11 +5031,11 @@ mod tests {
         assert!(target.queued_events.is_empty());
         assert!(matches!(
             block_on(command_rx).expect("command sender resolves"),
-            Err(CdpError::NoResponse)
+            Err(CdpError::TargetClosed)
         ));
         assert!(matches!(
             block_on(navigate_rx).expect("navigation sender resolves"),
-            Err(CdpError::NoResponse)
+            Err(CdpError::TargetClosed)
         ));
         assert_eq!(
             block_on(wait_rx).expect("wait sender resolves"),
@@ -4971,11 +5043,11 @@ mod tests {
         );
         assert!(matches!(
             block_on(preload_rx).expect("preload sender resolves"),
-            Err(CdpError::NoResponse)
+            Err(CdpError::TargetClosed)
         ));
         assert!(matches!(
             block_on(ack_rx).expect("fan-out ack sender resolves"),
-            Err(CdpError::NoResponse)
+            Err(CdpError::TargetClosed)
         ));
     }
 }

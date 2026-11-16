@@ -30,10 +30,11 @@ use chromiumoxide_cdp::cdp::js_protocol::runtime::{
 use chromiumoxide_types::{Command, CommandResponse};
 
 use crate::cmd::{CommandMessage, to_command_response};
-use crate::error::{CdpError, Result};
+use crate::error::{CdpError, Result, TargetChannelResult};
 use crate::frame::Frame;
 use crate::handler::commandfuture::CommandFuture;
 use crate::handler::domworld::DOMWorldKind;
+use crate::handler::frame::LifecycleEvent;
 use crate::handler::httpfuture::HttpFuture;
 use crate::handler::target::{
     FrameBoundary, FrameInfo, GetExecutionContext, InternalTargetMessage, TargetMessage,
@@ -115,7 +116,8 @@ impl PageInner {
                 session_id: session_id.clone(),
                 command,
             })
-            .await?;
+            .await
+            .or_target_closed()?;
         let response = rx.await??;
         to_command_response::<T>(response, method)
     }
@@ -131,16 +133,64 @@ impl PageInner {
     }
 
     /// This creates navigation future with the final http response when the page is loaded
+    ///
+    /// Fails with [`CdpError::Timeout`] when the page does not finish loading
+    /// within the configured request timeout.
     pub(crate) fn wait_for_navigation(&self) -> BoxFuture<'static, Result<ArcHttpRequest>> {
         let mut sender = self.internal_sender.clone();
-        async move {
+        let timeout = self.request_timeout;
+        with_timeout(timeout, async move {
             let (tx, rx) = oneshot_channel();
             sender
                 .send(InternalTargetMessage::WaitForNavigationResult { tx })
-                .await?;
+                .await
+                .or_target_closed()?;
             rx.await?
-        }
+        })
         .boxed()
+    }
+
+    /// Resolve once the main frame fired `event` for its current document,
+    /// bounded by the configured request timeout.
+    pub(crate) fn wait_for_lifecycle(
+        &self,
+        event: LifecycleEvent,
+    ) -> BoxFuture<'static, Result<ArcHttpRequest>> {
+        let mut sender = self.internal_sender.clone();
+        let timeout = self.request_timeout;
+        with_timeout(timeout, async move {
+            let (tx, rx) = oneshot_channel();
+            sender
+                .send(InternalTargetMessage::WaitForLifecycle {
+                    event: event.as_ref().to_owned().into(),
+                    tx,
+                })
+                .await
+                .or_target_closed()?;
+            rx.await?
+        })
+        .boxed()
+    }
+
+    /// Resolve once this page's target has been torn down, bounded by the
+    /// configured request timeout. Resolves immediately when it already is.
+    pub(crate) async fn wait_for_close(&self) -> Result<()> {
+        let mut sender = self.internal_sender.clone();
+        with_timeout(self.request_timeout, async move {
+            let (tx, rx) = oneshot_channel();
+            if sender
+                .send(InternalTargetMessage::WaitForClose { tx })
+                .await
+                .is_err()
+            {
+                // The target already closed its channel during teardown.
+                return Ok(());
+            }
+            // A dropped sender also means the target is gone.
+            let _ = rx.await;
+            Ok(())
+        })
+        .await
     }
 
     /// This creates HTTP future with navigation and responds with the final
@@ -183,7 +233,8 @@ impl PageInner {
         self.internal_sender
             .clone()
             .send(InternalTargetMessage::GetFrameInfo { frame_id, tx })
-            .await?;
+            .await
+            .or_target_closed()?;
         rx.await?
     }
 
@@ -201,7 +252,8 @@ impl PageInner {
                 expected_session_id,
                 tx,
             })
-            .await?;
+            .await
+            .or_target_closed()?;
         rx.await?
     }
 
@@ -221,7 +273,8 @@ impl PageInner {
         self.internal_sender
             .clone()
             .send(InternalTargetMessage::GetAllFrames { tx })
-            .await?;
+            .await
+            .or_target_closed()?;
         Ok(rx
             .await?
             .into_iter()
@@ -234,7 +287,8 @@ impl PageInner {
         self.sender
             .clone()
             .send(TargetMessage::MainFrame(tx))
-            .await?;
+            .await
+            .or_target_closed()?;
         let Some(frame_id) = rx.await? else {
             return Ok(None);
         };
@@ -487,7 +541,8 @@ impl PageInner {
                 frame_id,
                 tx,
             }))
-            .await?;
+            .await
+            .or_target_closed()?;
         Ok(rx.await?)
     }
 
@@ -558,6 +613,18 @@ impl PageInner {
     }
 }
 
+/// Bound `future` by `timeout`, failing with [`CdpError::Timeout`].
+pub(crate) async fn with_timeout<T>(
+    timeout: Duration,
+    future: impl std::future::Future<Output = Result<T>>,
+) -> Result<T> {
+    let future = std::pin::pin!(future);
+    match futures::future::select(future, futures_timer::Delay::new(timeout)).await {
+        futures::future::Either::Left((result, _)) => result,
+        futures::future::Either::Right(_) => Err(CdpError::Timeout),
+    }
+}
+
 pub(crate) async fn execute<T: Command>(
     cmd: T,
     mut sender: Sender<TargetMessage>,
@@ -567,7 +634,10 @@ pub(crate) async fn execute<T: Command>(
     let method = cmd.identifier();
     let msg = CommandMessage::with_session(cmd, tx, session)?;
 
-    sender.send(TargetMessage::Command(msg)).await?;
+    sender
+        .send(TargetMessage::Command(msg))
+        .await
+        .or_target_closed()?;
     let resp = rx.await??;
     to_command_response::<T>(resp, method)
 }

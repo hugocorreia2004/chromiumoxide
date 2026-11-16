@@ -33,12 +33,12 @@ use chromiumoxide_types::*;
 
 use crate::auth::Credentials;
 use crate::element::Element;
-use crate::error::{CdpError, Result};
+use crate::error::{CdpError, Result, TargetChannelResult};
 use crate::frame::Frame;
 use crate::handler::PageInner;
 use crate::handler::commandfuture::CommandFuture;
 use crate::handler::domworld::DOMWorldKind;
-use crate::handler::frame::HTTP_RESPONSE_CODE_FAILURE;
+use crate::handler::frame::{HTTP_RESPONSE_CODE_FAILURE, LifecycleEvent};
 use crate::handler::httpfuture::HttpFuture;
 use crate::handler::target::{GetName, GetParent, GetUrl, InternalTargetMessage, TargetMessage};
 use crate::js::{Evaluation, EvaluationResult};
@@ -555,7 +555,8 @@ impl Page {
                 request: subscription,
                 tx: ack_tx,
             })
-            .await?;
+            .await
+            .or_target_closed()?;
         ack_rx.await??;
 
         Ok(())
@@ -579,7 +580,8 @@ impl Page {
                 commands: self.inner.sender().clone(),
                 tx,
             })
-            .await?;
+            .await
+            .or_target_closed()?;
         rx.await??;
 
         Ok(PausedRequestStream { inner })
@@ -617,6 +619,33 @@ impl Page {
     /// Same as `wait_for_navigation_response` but returns `Self` instead
     pub async fn wait_for_navigation(&self) -> Result<&Self> {
         self.inner.wait_for_navigation().await?;
+        Ok(self)
+    }
+
+    /// Like [`Page::wait_for_navigation`], but resolves once the main frame
+    /// fired the given lifecycle event for its current document instead of
+    /// `load`.
+    ///
+    /// [`LifecycleEvent::NetworkIdle`] waits until the main frame, and every
+    /// subframe that started loading, had no network activity for 500 ms
+    /// (Chrome's `networkIdle` lifecycle event, the equivalent of
+    /// Puppeteer's `networkidle0`). Fails with [`CdpError::Timeout`] after the
+    /// configured request timeout.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use chromiumoxide::page::Page;
+    /// # use chromiumoxide::error::Result;
+    /// # use chromiumoxide::handler::frame::LifecycleEvent;
+    /// # async fn demo(page: Page) -> Result<()> {
+    ///     page.goto("https://example.com").await?;
+    ///     page.wait_for_navigation_until(LifecycleEvent::NetworkIdle).await?;
+    ///     # Ok(())
+    /// # }
+    /// ```
+    pub async fn wait_for_navigation_until(&self, event: LifecycleEvent) -> Result<&Self> {
+        self.inner.wait_for_lifecycle(event).await?;
         Ok(self)
     }
 
@@ -659,7 +688,8 @@ impl Page {
                 frame_id: Some(frame_id),
                 tx,
             }))
-            .await?;
+            .await
+            .or_target_closed()?;
         Ok(rx.await?)
     }
 
@@ -674,7 +704,8 @@ impl Page {
             .internal_sender()
             .clone()
             .send(InternalTargetMessage::SetCredentials { credentials, tx })
-            .await?;
+            .await
+            .or_target_closed()?;
         rx.await??;
 
         Ok(())
@@ -696,7 +727,8 @@ impl Page {
             .internal_sender()
             .clone()
             .send(InternalTargetMessage::SetRequestInterception { enabled, tx })
-            .await?;
+            .await
+            .or_target_closed()?;
         rx.await??;
 
         Ok(())
@@ -709,7 +741,8 @@ impl Page {
             .sender()
             .clone()
             .send(TargetMessage::Url(GetUrl::new(tx)))
-            .await?;
+            .await
+            .or_target_closed()?;
         Ok(rx.await?)
     }
 
@@ -723,7 +756,8 @@ impl Page {
                 frame_id: Some(frame_id),
                 tx,
             }))
-            .await?;
+            .await
+            .or_target_closed()?;
         Ok(rx.await?)
     }
 
@@ -734,7 +768,8 @@ impl Page {
             .sender()
             .clone()
             .send(TargetMessage::Parent(GetParent { frame_id, tx }))
-            .await?;
+            .await
+            .or_target_closed()?;
         Ok(rx.await?)
     }
 
@@ -745,7 +780,8 @@ impl Page {
             .sender()
             .clone()
             .send(TargetMessage::MainFrame(tx))
-            .await?;
+            .await
+            .or_target_closed()?;
         Ok(rx.await?)
     }
 
@@ -756,7 +792,8 @@ impl Page {
             .sender()
             .clone()
             .send(TargetMessage::AllFrames(tx))
-            .await?;
+            .await
+            .or_target_closed()?;
         Ok(rx.await?)
     }
 
@@ -900,9 +937,14 @@ impl Page {
 
     /// Tries to close page, running its beforeunload hooks, if any.
     /// Calls Page.close with [`CloseParams`]
+    ///
+    /// Resolves once the target is gone. From then on, every operation on a
+    /// clone of this page, its frames or its elements fails with
+    /// [`CdpError::TargetClosed`] without reaching the browser, pending
+    /// waiters fail the same way, and its event streams end.
     pub async fn close(self) -> Result<()> {
         self.execute(CloseParams::default()).await?;
-        Ok(())
+        self.inner.wait_for_close().await
     }
 
     /// Performs a single mouse click event at the point's location.
@@ -1653,7 +1695,8 @@ impl Page {
                 params: script.into(),
                 tx,
             })
-            .await?;
+            .await
+            .or_target_closed()?;
         rx.await?
     }
 
