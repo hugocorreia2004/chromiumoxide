@@ -41,11 +41,18 @@ pub mod actions;
 mod browser;
 mod browser_context;
 mod browser_type;
+mod console;
+mod context_ext;
+mod dialog;
+mod download;
 mod element_actions;
 mod error;
+mod events;
 pub mod execution_context;
+mod file_chooser;
 mod frame;
 mod frame_selectors;
+mod har;
 pub mod input;
 pub mod js;
 mod js_handle;
@@ -53,11 +60,16 @@ mod locator;
 mod locator_generators;
 mod locator_utils;
 mod network;
+mod network_manager;
 mod page;
+mod page_ext;
 mod progress;
+mod route;
 mod selector_parser;
 mod selectors;
 mod url_match;
+mod websocket;
+mod worker;
 
 pub use actions::{
     Action, BoundingBox, Click, Dblclick, ElementState, FilePayload, Fill, Hover, InputFiles,
@@ -67,13 +79,19 @@ pub use actions::{
 pub use browser::Browser;
 pub use browser_context::{BrowserContext, NewContext, NewContextOptions};
 pub use browser_type::{BrowserType, ConnectOverCdp, Launch, LaunchOptions, chromium};
+pub use console::{ConsoleMessage, ConsoleMessageLocation, WebError};
+pub use dialog::Dialog;
+pub use download::Download;
 pub use element_actions::WaitForSelectorState;
 pub use error::{CONTEXT_DESTROYED_MESSAGE, Error, Result, TARGET_CLOSED_MESSAGE};
+pub use events::{Event, EventKind, ListenerId, WaitForEvent};
 pub use execution_context::{ExecutionContext, World};
+pub use file_chooser::FileChooser;
 pub use frame::{
     Frame, FrameEvaluate, FrameEvaluateHandle, Goto, LoadState, SetContent, WaitForLoadState,
     WaitForNavigation, WaitForUrl,
 };
+pub use har::{HarContentPolicy, HarMode, HarNotFound, RecordHar, RouteFromHar};
 pub use input::{
     Keyboard, KeyboardModifier, KeyboardPress, KeyboardType, Mouse, MouseButton, MouseButtonAction,
     MouseClick, MouseMove, Touchscreen,
@@ -84,11 +102,20 @@ pub use locator::{
     FrameLocator, GetByOptions, GetByRoleOptions, Locator, LocatorOptions, SelectorOrLocator,
 };
 pub use locator_utils::{JsRegex, TextMatch, regex};
-pub use network::{Request, Response};
+pub use network::{
+    Header, RemoteAddr, Request, RequestSizes, ResourceTiming, Response, SecurityDetails,
+};
+pub use network_manager::HttpCredentials;
 pub use page::{AddInitScript, GoHistory, InitScript, Page, Reload, ViewportSize};
 pub use progress::DEFAULT_TIMEOUT;
+pub use route::{
+    APIResponse, Abort, Continue, Fallback, Fetch, Fulfill, Route, RouteBuilder, RouteHandlerFn,
+    RouteId, Unroute, UnrouteAll, UnrouteBehavior,
+};
 pub use selectors::{Selectors, selectors};
 pub use url_match::{UrlMatch, glob_to_regex_pattern};
+pub use websocket::{WebSocket, WebSocketEvent, WebSocketPayload};
+pub use worker::{Worker, WorkerEvaluate};
 
 /// Re-export of the underlying CDP library.
 pub use chromiumoxide;

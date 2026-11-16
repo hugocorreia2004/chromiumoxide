@@ -65,10 +65,47 @@ async fn main() -> oxidewright::Result<()> {
 
 Implemented: `chromium()`, `BrowserType::{launch, connect_over_cdp}`, `Browser`,
 `BrowserContext`, `Page` and `Frame` navigation/evaluation/hierarchy, `JSHandle` and
-`ElementHandle` basics, `Request`/`Response` of navigations.
+`ElementHandle` basics, and the network and events API:
 
-Planned: locators, actions and selectors; network routing and events; keyboard, mouse and
-touch; dialogs, downloads, workers and the rest of the Playwright API.
+* `Request`/`Response` (headers, raw headers, post data, timing, sizes, redirect chains,
+  bodies) and the `request`, `response`, `requestfinished`, `requestfailed` events.
+* Routing: `page.route`/`context.route` (glob, regex, predicate, `times`), `unroute`,
+  `unroute_all`, `Route::{fulfill, continue_, fallback, abort, fetch}`, `route_from_har`.
+  `Fetch.enable` is only sent while routes (or HTTP credentials) exist.
+* Events with closure handlers (`page.on_request(..)`, `page.on(EventKind::Popup, ..)`) and
+  waiters (`page.wait_for_request(..)`, `page.expect_popup(action)`, ...): popup, page, close,
+  crash, dialog (auto-dismissed without listeners), download, filechooser, load,
+  domcontentloaded, frame events, websocket, worker.
+* `record_har`, `set_extra_http_headers`, `set_offline`, `http_credentials`,
+  `ignore_https_errors`, `accept_downloads`.
+
+```rust,ignore
+page.route("**/*.png", |route: Route| async move { route.abort().await }).await?;
+
+// The subscription starts when `wait_for_response` is called.
+let response = page.wait_for_response("**/api/data");
+page.evaluate::<()>("() => { fetch('/api/data') }").await?;
+let data: serde_json::Value = response.await?.json().await?;
+
+let popup = page.expect_popup(page.evaluate::<()>("() => { window.open('/x') }")).await?;
+```
+
+### Network and events: differences with Playwright
+
+* `console` and `pageerror` events need `Runtime.enable`, which page scripts can detect
+  (Patchright drops them entirely). They are **opt-in**: create the context with
+  `.console_events(true)`.
+* `route.fetch()` performs the request through the browser itself (the request is continued
+  with response interception), so it keeps the browser's network fingerprint; it can be called
+  once per route and returns redirects as-is.
+* Workers are evaluated with `Runtime.evaluate` in their session (no `Runtime.enable`): values
+  cross as JSON and `evaluate_handle` is not available.
+* Not implemented: `route_web_socket` (Playwright implements it with a script injected in the
+  page, which is detectable), service workers (`serviceworker` event, `fromServiceWorker`
+  routing), zipped HAR files, intercepting the very first request of a popup or of an
+  out-of-process iframe (they are adopted once the browser reports them).
+
+Planned: locators, actions and selectors; keyboard, mouse and touch; emulation and screenshots.
 
 ## Updating the bundled scripts
 

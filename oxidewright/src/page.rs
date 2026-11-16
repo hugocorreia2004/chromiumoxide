@@ -37,7 +37,8 @@ use crate::frame::{
     DocumentInfo, Frame, FrameEvaluate, FrameEvaluateHandle, Goto, LoadState, NavigationEvent,
     SetContent, WaitForLoadState, WaitForNavigation, WaitForUrl,
 };
-use crate::network::{Request, RequestInner, RequestState, ResponseData, headers_to_map};
+use crate::network::Request;
+use crate::page_ext::PageExt;
 use crate::progress::TimeoutSettings;
 use crate::url_match::{UrlMatch, construct_url_based_on_base_url};
 
@@ -138,7 +139,9 @@ pub(crate) struct PageInner {
     closed: AtomicBool,
     frame_seq: AtomicU64,
     timer_seq: AtomicU64,
-    requests: Mutex<HashMap<String, Request>>,
+    pub(crate) requests: Mutex<HashMap<String, Request>>,
+    /// Events, network, routing, dialogs... (see `page_ext.rs`).
+    pub(crate) ext: PageExt,
     timer_tx: UnboundedSender<(String, u64)>,
     viewport: Mutex<Option<ViewportSize>>,
     /// Keyboard, mouse and touchscreen state (see [`crate::input`]).
@@ -146,7 +149,7 @@ pub(crate) struct PageInner {
     /// Protocol events not yet applied; drained by the pump task and, for
     /// accessors, synchronously (see [`PageInner::sync`]).
     events: Mutex<Option<FutReceiver<Arc<dyn Event>>>>,
-    self_weak: Weak<PageInner>,
+    pub(crate) self_weak: Weak<PageInner>,
 }
 
 impl PageInner {
@@ -174,6 +177,7 @@ impl PageInner {
             frame_seq: AtomicU64::new(0),
             timer_seq: AtomicU64::new(0),
             requests: Mutex::new(HashMap::new()),
+            ext: PageExt::default(),
             timer_tx,
             viewport: Mutex::new(None),
             input,
@@ -795,136 +799,54 @@ impl PageInner {
     // Network bookkeeping (navigation requests and network idleness)
     // ------------------------------------------------------------------
 
-    fn on_request_will_be_sent(&self, ev: &EventRequestWillBeSent) {
-        if ev.request.url.starts_with("data:") {
+    /// `FrameManager.requestStarted` bookkeeping: in-flight requests,
+    /// network idleness and the pending document of navigations.
+    pub(crate) fn network_request_started(&self, request: &Request) {
+        if request.inner.is_favicon {
             return;
         }
-        let mut fx = Effects::default();
-        let request_id = ev.request_id.as_ref().to_string();
-        let mut redirected_from = None;
-        if let Some(redirect) = &ev.redirect_response {
-            let previous = self.requests.lock().unwrap().remove(&request_id);
-            if let Some(previous) = previous {
-                previous.inner.state.lock().unwrap().response = Some(response_data(redirect));
-                let mut state = self.tree.lock().unwrap();
-                self.request_finished(&mut state, &previous, &mut fx);
-                previous.mark_finished();
-                redirected_from = Some(previous);
-            }
-        }
-        let frame_id = ev.frame_id.as_ref().map(|f| f.as_ref().to_string());
-        let frame = frame_id.as_deref().and_then(|id| self.frame_by_id(id));
-        let resource_type = ev
-            .r#type
-            .as_ref()
-            .map(|t| t.as_ref().to_lowercase())
-            .unwrap_or_else(|| "other".to_string());
-        let is_navigation =
-            ev.request_id.as_ref() == ev.loader_id.as_ref() && resource_type == "document";
-        let document_id = is_navigation.then(|| ev.loader_id.as_ref().to_string());
-        let request = Request {
-            inner: Arc::new(RequestInner {
-                id: request_id.clone(),
-                url: format!(
-                    "{}{}",
-                    ev.request.url,
-                    ev.request.url_fragment.clone().unwrap_or_default()
-                ),
-                method: ev.request.method.clone(),
-                resource_type: resource_type.clone(),
-                headers: headers_to_map(&ev.request.headers),
-                post_data: None,
-                frame,
-                document_id: document_id.clone(),
-                redirected_from: redirected_from.clone(),
-                page: self.self_weak.clone(),
-                state: Mutex::new(RequestState::default()),
-                finished: tokio::sync::watch::channel(false).0,
-            }),
+        let Some(frame) = &request.inner.frame else {
+            return;
         };
-        if let Some(previous) = &redirected_from {
-            previous.inner.state.lock().unwrap().redirected_to =
-                Some(Arc::downgrade(&request.inner));
-        }
-        self.requests
-            .lock()
-            .unwrap()
-            .insert(request_id.clone(), request.clone());
-        {
-            let mut state = self.tree.lock().unwrap();
-            if let Some(frame_id) = &frame_id {
-                if let Some(data) = state.frames.get_mut(frame_id) {
-                    data.inflight.insert(request_id.clone());
-                    if resource_type != "eventsource" {
-                        data.idle_requests.insert(request_id.clone());
-                        if data.idle_requests.len() == 1 {
-                            self.stop_idle_timer(&mut state, frame_id);
-                        }
-                    }
-                    if let Some(document_id) = document_id {
-                        if let Some(data) = state.frames.get_mut(frame_id) {
-                            data.pending_document = Some(DocumentInfo {
-                                document_id: Some(document_id),
-                                request: Some(request.clone()),
-                            });
-                        }
-                    }
+        let frame_id = frame.id().to_string();
+        let request_id = request.inner.id.clone();
+        let mut state = self.tree.lock().unwrap();
+        if let Some(data) = state.frames.get_mut(&frame_id) {
+            data.inflight.insert(request_id.clone());
+            if request.resource_type() != "eventsource" {
+                data.idle_requests.insert(request_id.clone());
+                if data.idle_requests.len() == 1 {
+                    self.stop_idle_timer(&mut state, &frame_id);
+                }
+            }
+            if let Some(document_id) = &request.inner.document_id {
+                if let Some(data) = state.frames.get_mut(&frame_id) {
+                    data.pending_document = Some(DocumentInfo {
+                        document_id: Some(document_id.clone()),
+                        request: Some(request.clone()),
+                    });
                 }
             }
         }
-        self.apply(fx);
     }
 
-    fn request_finished(&self, state: &mut Tree, request: &Request, fx: &mut Effects) -> bool {
-        let Some(frame) = &request.inner.frame else {
-            return true;
-        };
-        let id = frame.id().to_string();
-        let Some(data) = state.frames.get_mut(&id) else {
-            return false;
-        };
-        if !data.inflight.remove(&request.inner.id) {
-            return false;
-        }
-        if data.idle_requests.remove(&request.inner.id) && data.idle_requests.is_empty() {
-            self.start_idle_timer(state, &id, fx);
-        }
-        true
-    }
-
-    fn on_response_received(&self, ev: &EventResponseReceived) {
-        let request = self
-            .requests
-            .lock()
-            .unwrap()
-            .get(ev.request_id.as_ref())
-            .cloned();
-        if let Some(request) = request {
-            request.inner.state.lock().unwrap().response = Some(response_data(&ev.response));
-        }
-    }
-
-    fn on_loading_finished(&self, ev: &EventLoadingFinished) {
-        let request = self.requests.lock().unwrap().remove(ev.request_id.as_ref());
-        let Some(request) = request else {
-            return;
-        };
+    /// `FrameManager.reportRequestFinished` bookkeeping; returns whether the
+    /// request was in flight.
+    pub(crate) fn network_request_finished(&self, request: &Request) -> bool {
         let mut fx = Effects::default();
-        {
+        let was_inflight = {
             let mut state = self.tree.lock().unwrap();
-            self.request_finished(&mut state, &request, &mut fx);
-        }
-        request.mark_finished();
+            self.request_finished(&mut state, request, &mut fx)
+        };
         self.apply(fx);
+        was_inflight
     }
 
-    fn on_loading_failed(&self, ev: &EventLoadingFailed) {
-        let request = self.requests.lock().unwrap().remove(ev.request_id.as_ref());
-        let Some(request) = request else {
-            return;
-        };
-        request.inner.state.lock().unwrap().failure = Some(ev.error_text.clone());
+    /// `FrameManager.requestFailed` bookkeeping (aborts the pending
+    /// navigation of the request); returns whether it was in flight.
+    pub(crate) fn network_request_failed(&self, request: &Request, canceled: bool) -> bool {
         let mut fx = Effects::default();
+        let was_inflight;
         {
             let mut state = self.tree.lock().unwrap();
             if let Some(frame) = &request.inner.frame {
@@ -936,8 +858,8 @@ impl PageInner {
                     .and_then(|p| p.request.as_ref())
                     .is_some_and(|r| Arc::ptr_eq(&r.inner, &request.inner));
                 if is_pending {
-                    let mut error_text = ev.error_text.clone();
-                    if ev.canceled == Some(true) {
+                    let mut error_text = request.failure().unwrap_or_default();
+                    if canceled {
                         error_text.push_str("; maybe frame was detached?");
                     }
                     let document_id = state
@@ -954,10 +876,30 @@ impl PageInner {
                     );
                 }
             }
-            self.request_finished(&mut state, &request, &mut fx);
+            was_inflight = self.request_finished(&mut state, request, &mut fx);
         }
-        request.mark_finished();
         self.apply(fx);
+        was_inflight
+    }
+
+    fn request_finished(&self, state: &mut Tree, request: &Request, fx: &mut Effects) -> bool {
+        if request.inner.is_favicon {
+            return true;
+        }
+        let Some(frame) = &request.inner.frame else {
+            return true;
+        };
+        let id = frame.id().to_string();
+        let Some(data) = state.frames.get_mut(&id) else {
+            return false;
+        };
+        if !data.inflight.remove(&request.inner.id) {
+            return false;
+        }
+        if data.idle_requests.remove(&request.inner.id) && data.idle_requests.is_empty() {
+            self.start_idle_timer(state, &id, fx);
+        }
+        true
     }
 
     // ------------------------------------------------------------------
@@ -1066,37 +1008,10 @@ impl PageInner {
             }
             Err(any) => any,
         };
-        let any = match any.downcast::<EventRequestWillBeSent>() {
-            Ok(ev) => {
-                self.on_request_will_be_sent(&ev);
-                return;
-            }
-            Err(any) => any,
-        };
-        let any = match any.downcast::<EventResponseReceived>() {
-            Ok(ev) => {
-                self.on_response_received(&ev);
-                return;
-            }
-            Err(any) => any,
-        };
-        let any = match any.downcast::<EventLoadingFinished>() {
-            Ok(ev) => {
-                self.on_loading_finished(&ev);
-                return;
-            }
-            Err(any) => any,
-        };
-        let any = match any.downcast::<EventLoadingFailed>() {
-            Ok(ev) => {
-                self.on_loading_failed(&ev);
-                return;
-            }
-            Err(any) => any,
-        };
-        if let Ok(ev) = any.downcast::<EventDetachedFromTarget>() {
+        if let Some(ev) = any.downcast_ref::<EventDetachedFromTarget>() {
             self.on_session_detached(ev.session_id.as_ref().to_string());
         }
+        crate::page_ext::handle_event(self, any);
     }
 
     fn with_effects(&self, f: impl FnOnce(&Self, &mut Tree, &mut Effects)) {
@@ -1151,6 +1066,7 @@ impl PageInner {
         for tx in subscribers {
             let _ = tx.send(PageEvent::Closed);
         }
+        crate::page_ext::did_close(self);
         if let Some(context) = self.context.upgrade() {
             context.remove_page(self);
         }
@@ -1206,19 +1122,6 @@ impl PageInner {
     }
 }
 
-fn response_data(
-    response: &chromiumoxide::cdp::browser_protocol::network::Response,
-) -> ResponseData {
-    ResponseData {
-        url: response.url.clone(),
-        status: response.status,
-        status_text: response.status_text.clone(),
-        headers: headers_to_map(&response.headers),
-        from_cache: response.from_disk_cache == Some(true)
-            || response.from_prefetch_cache == Some(true),
-    }
-}
-
 async fn subscribe_events(cdp: &chromiumoxide::Page, tx: &FutSender<Arc<dyn Event>>) -> Result<()> {
     async fn one<T: IntoEventKind>(
         cdp: &chromiumoxide::Page,
@@ -1239,7 +1142,7 @@ async fn subscribe_events(cdp: &chromiumoxide::Page, tx: &FutSender<Arc<dyn Even
     one::<EventLoadingFinished>(cdp, tx).await?;
     one::<EventLoadingFailed>(cdp, tx).await?;
     one::<EventDetachedFromTarget>(cdp, tx).await?;
-    Ok(())
+    crate::page_ext::subscribe(cdp, tx).await
 }
 
 async fn pump(page: Arc<PageInner>, mut timers: UnboundedReceiver<(String, u64)>) {
