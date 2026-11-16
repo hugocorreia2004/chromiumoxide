@@ -23,7 +23,7 @@ use crate::execution_context::Evaluated;
 use crate::frame::Frame;
 use crate::frame_selectors::{
     Backoff, CallArg, CallOptions, SelectorTarget, call_function, call_injected, call_on_selector,
-    describe_selector, handle_of, is_non_retriable, value_of,
+    describe_selector, detached_or, handle_of, is_non_retriable, value_of,
 };
 use crate::input::{KeyboardModifier, MouseButton};
 use crate::js::JsValue;
@@ -282,7 +282,7 @@ impl ElementHandle {
         .await;
         match result {
             Ok(evaluated) => Ok(Some(value_of(evaluated))),
-            Err(e) if is_non_retriable(&e, Some(&frame)) => Err(e),
+            Err(e) if is_non_retriable(&e, Some(&frame)) => Err(detached_or(e, &frame)),
             Err(e) => {
                 tracing::debug!("evaluateInUtility failed: {e}");
                 Ok(None)
@@ -311,7 +311,7 @@ impl ElementHandle {
         .await;
         match result {
             Ok(handle) => Ok(Some(handle)),
-            Err(e) if is_non_retriable(&e, Some(&frame)) => Err(e),
+            Err(e) if is_non_retriable(&e, Some(&frame)) => Err(detached_or(e, &frame)),
             Err(_) => Ok(None),
         }
     }
@@ -640,7 +640,9 @@ impl ElementHandle {
                 .await;
                 let value = match result {
                     Ok(e) => value_of(e),
-                    Err(e) if is_non_retriable(&e, Some(&frame)) => return Err(e),
+                    Err(e) if is_non_retriable(&e, Some(&frame)) => {
+                        return Err(detached_or(e, &frame));
+                    }
                     Err(_) => return Ok(Outcome::NotConnected),
                 };
                 let outcome = parse_outcome(&value);
@@ -1509,7 +1511,7 @@ pub(crate) async fn retry_with_progress_if_not_connected(
         match attempt {
             Ok(Some(output)) => return Ok(output),
             Ok(None) => continue,
-            Err(e) if is_non_retriable(&e, Some(frame)) => return Err(e),
+            Err(e) if is_non_retriable(&e, Some(frame)) => return Err(detached_or(e, frame)),
             Err(e) => {
                 tracing::debug!("retrying after error: {e}");
                 continue;
@@ -1566,7 +1568,7 @@ pub(crate) async fn wait_for_function_on_selector(
         .await;
         let resolved = match attempt {
             Ok(r) => r,
-            Err(e) if is_non_retriable(&e, Some(frame)) => return Err(e),
+            Err(e) if is_non_retriable(&e, Some(frame)) => return Err(detached_or(e, frame)),
             Err(_) => continue,
         };
         let Some(resolved) = resolved else {
@@ -1749,7 +1751,7 @@ pub(crate) async fn wait_for_selector(
         match attempt {
             Ok(Some(result)) => return Ok(result),
             Ok(None) => continue,
-            Err(e) if is_non_retriable(&e, Some(frame)) => return Err(e),
+            Err(e) if is_non_retriable(&e, Some(frame)) => return Err(detached_or(e, frame)),
             Err(_) => continue,
         }
     }
@@ -1794,7 +1796,7 @@ pub(crate) async fn is_visible_internal(frame: &Frame, target: &SelectorTarget) 
     match result {
         Ok(Some(r)) => Ok(value_of(r.result).as_bool() == Some(true)),
         Ok(None) => Ok(false),
-        Err(e) if is_non_retriable(&e, Some(frame)) => Err(e),
+        Err(e) if is_non_retriable(&e, Some(frame)) => Err(detached_or(e, frame)),
         Err(_) => Ok(false),
     }
 }

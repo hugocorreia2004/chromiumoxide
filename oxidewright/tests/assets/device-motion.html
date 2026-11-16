@@ -2,6 +2,8 @@
 <script>
   window.result = 'Not moved';
   window.addEventListener('devicemotion', e => {
+    // Ignore real (trusted) events Chrome fires without sensors.
+    if (e.isTrusted) return;
     window.result = 'Moved';
     window.acceleration = { x: e.acceleration.x, y: e.acceleration.y, z: e.acceleration.z };
     window.accelerationIncludingGravity = { x: e.accelerationIncludingGravity.x, y: e.accelerationIncludingGravity.y, z: e.accelerationIncludingGravity.z };

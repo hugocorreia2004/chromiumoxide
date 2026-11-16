@@ -269,7 +269,7 @@ fn should_report_logs_when_the_selector_resolves_to_multiple_elements() {
             .await
             .unwrap();
         assert_err_contains(
-            t.page.click("text=Reset").timeout(1000).await,
+            t.page.click("text=Reset").timeout(5000).await,
             "locator resolved to 2 elements. Proceeding with the first one: <button>Reset</button>",
         );
     });

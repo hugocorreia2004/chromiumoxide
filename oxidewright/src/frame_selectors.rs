@@ -137,6 +137,17 @@ pub(crate) fn is_non_retriable(err: &Error, frame: Option<&Frame>) -> bool {
     }
 }
 
+/// A non-retriable error of an operation in `frame`: when the frame got
+/// detached meanwhile, report that (Playwright's `_detachedScope` rejects
+/// with "Frame was detached") instead of the incidental protocol error.
+pub(crate) fn detached_or(err: Error, frame: &Frame) -> Error {
+    if frame.is_detached() && !matches!(err, Error::FrameDetached { .. }) {
+        Error::frame_detached("Frame was detached")
+    } else {
+        err
+    }
+}
+
 /// Elements of a JavaScript array handle, in index order.
 pub(crate) async fn array_elements(array: &JSHandle) -> Result<Vec<JSHandle>> {
     let Some(object_id) = array.object_id().cloned() else {
