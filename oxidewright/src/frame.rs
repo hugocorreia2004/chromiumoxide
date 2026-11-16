@@ -677,6 +677,11 @@ impl Frame {
         progress.log(format!(
             "navigating to \"{url}\", waiting until \"{wait_until}\""
         ));
+        // Apply events already received before subscribing: a lagging pump
+        // would otherwise replay an earlier commit (e.g. the navigation this
+        // one replaces) as if it interrupted ours. Playwright only listens
+        // after `Page.navigate` returns, so it never sees those.
+        page.sync();
         let mut rx = page.subscribe();
         let frame_id = self.inner.id.clone();
         let mut detach_rx = page.subscribe();
