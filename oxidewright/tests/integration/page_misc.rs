@@ -448,9 +448,9 @@ fn browser_cdp_session_should_work() {
 #[test]
 fn opener_should_return_the_opening_page() {
     run(|t| async move {
-        assert!(t.page.opener().await.unwrap().is_none());
+        assert!(t.page.opener().is_none());
         let other = t.context.new_page().await.unwrap();
-        assert!(other.opener().await.unwrap().is_none());
+        assert!(other.opener().is_none());
     });
 }
 

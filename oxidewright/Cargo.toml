@@ -30,6 +30,7 @@ url = "2"
 regex = "1"
 base64 = "0.22"
 fastrand = "2"
+sha1_smol = "1"
 
 [features]
 default = ["stealth"]
@@ -39,7 +40,7 @@ default = ["stealth"]
 stealth = ["chromiumoxide/stealth"]
 
 [dev-dependencies]
-axum = "0.8"
+axum = { version = "0.8", features = ["ws"] }
 tokio = { version = "1", features = ["full"] }
 
 [[test]]

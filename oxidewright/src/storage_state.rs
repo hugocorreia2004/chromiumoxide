@@ -225,7 +225,7 @@ impl BrowserContext {
     fn visited_origins(&self) -> Vec<String> {
         let mut origins: Vec<String> = self
             .inner
-            .ext
+            .emu
             .origins
             .lock()
             .unwrap()
@@ -355,7 +355,7 @@ pub(crate) async fn set_storage_state(
             helper.close().await;
             restored?;
         }
-        let mut visited = context.inner.ext.origins.lock().unwrap();
+        let mut visited = context.inner.emu.origins.lock().unwrap();
         visited.clear();
         visited.extend(state.origins.iter().map(|o| o.origin.clone()));
         Ok(())

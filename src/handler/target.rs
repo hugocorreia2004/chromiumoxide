@@ -1422,6 +1422,12 @@ impl Target {
                         .on_attached_to_target_in_session(ev, ev.session_id.clone());
                     self.start_iframe_init(ev.session_id.clone());
                 }
+                if ev.target_info.r#type == "worker" {
+                    // Route commands sent to a dedicated worker's session (e.g.
+                    // `Runtime.evaluate`) and its events through this target.
+                    self.queued_events
+                        .push_back(TargetEvent::RegisterChildSession(ev.session_id.clone()));
+                }
                 if ev.waiting_for_debugger && !is_iframe {
                     let runtime_cmd = RunIfWaitingForDebuggerParams::default();
 
@@ -1485,6 +1491,11 @@ impl Target {
                     self.network_manager.on_fetch_request_paused(ev);
                 }
             }
+            // Only answer auth challenges for a `Fetch.enable` this crate sent
+            // itself: when another layer enabled the Fetch domain on the
+            // session, it owns `Fetch.continueWithAuth` (a second answer fails).
+            CdpEvent::FetchAuthRequired(_)
+                if !self.network_manager.is_request_interception_enabled() => {}
             CdpEvent::FetchAuthRequired(ev) => {
                 if let Some(session_id) = event_session_id.as_ref() {
                     self.network_manager
@@ -3152,8 +3163,20 @@ mod tests {
     }
 
     #[test]
+    fn auth_is_left_to_the_owner_of_an_external_fetch_enable() {
+        let (mut target, main_session) = initialized_target();
+        drain_target_events(&mut target);
+        target.on_event(auth_required_event_message(&main_session, "auth-request"));
+        assert!(!target.queued_events.iter().any(|event| matches!(
+            event,
+            TargetEvent::Request(request) if request.method.as_ref() == "Fetch.continueWithAuth"
+        )));
+    }
+
+    #[test]
     fn auth_auto_response_is_queued_before_typed_listener_delivery() {
         let (mut target, main_session) = initialized_target();
+        enable_user_interception(&mut target);
         drain_target_events(&mut target);
         let (events, receiver) = mpsc::unbounded();
         target
