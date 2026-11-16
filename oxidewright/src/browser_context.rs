@@ -29,6 +29,20 @@ pub struct NewContextOptions {
     pub viewport: Option<ViewportSize>,
     /// Base URL used to resolve relative URLs of `goto`, `wait_for_url`, ...
     pub base_url: Option<String>,
+    /// Extra HTTP headers sent with every request.
+    pub extra_http_headers: Vec<crate::Header>,
+    /// Emulate a disconnected network.
+    pub offline: bool,
+    /// Credentials for HTTP authentication.
+    pub http_credentials: Option<crate::HttpCredentials>,
+    /// Ignore HTTPS errors.
+    pub ignore_https_errors: bool,
+    /// Accept downloads (default `true`).
+    pub accept_downloads: bool,
+    /// Record a HAR file.
+    pub record_har: Option<crate::RecordHar>,
+    /// Report `console`/`pageerror` events (enables `Runtime`, not stealthy).
+    pub console_events: bool,
     /// Screen size exposed to pages (`window.screen`); defaults to the viewport.
     pub screen: Option<ViewportSize>,
     /// Device scale factor (`window.devicePixelRatio`), default 1.
@@ -59,10 +73,6 @@ pub struct NewContextOptions {
     pub java_script_enabled: Option<bool>,
     /// Bypass the page's Content-Security-Policy.
     pub bypass_csp: bool,
-    /// Ignore HTTPS errors (pages and `context.request()`).
-    pub ignore_https_errors: bool,
-    /// Accept downloads (default `true`); `None` keeps the browser's behavior.
-    pub accept_downloads: Option<bool>,
     /// Make locators strict by default.
     pub strict_selectors: bool,
     /// Whether pages may register service workers.
@@ -78,7 +88,6 @@ impl Default for NewContextOptions {
                 width: 1280,
                 height: 720,
             }),
-            accept_downloads: Some(true),
             ..Self::no_overrides()
         }
     }
@@ -91,6 +100,13 @@ impl NewContextOptions {
         Self {
             viewport: None,
             base_url: None,
+            extra_http_headers: Vec::new(),
+            offline: false,
+            http_credentials: None,
+            ignore_https_errors: false,
+            accept_downloads: true,
+            record_har: None,
+            console_events: false,
             screen: None,
             device_scale_factor: None,
             is_mobile: None,
@@ -106,8 +122,6 @@ impl NewContextOptions {
             contrast: None,
             java_script_enabled: None,
             bypass_csp: false,
-            ignore_https_errors: false,
-            accept_downloads: None,
             strict_selectors: false,
             service_workers: Default::default(),
             storage_state: None,
@@ -126,10 +140,12 @@ pub(crate) struct ContextInner {
     pub(crate) browser: Weak<BrowserInner>,
     pub(crate) options: NewContextOptions,
     pub(crate) timeouts: Arc<TimeoutSettings>,
+    /// Events, routes, network options (see `context_ext.rs`).
+    pub(crate) ext: crate::context_ext::ContextExt,
     pages: Mutex<Vec<Page>>,
     init_scripts: Mutex<Vec<String>>,
     closed: AtomicBool,
-    pub(crate) ext: crate::ext::ContextExt,
+    pub(crate) emu: crate::ext::ContextExt,
 }
 
 impl fmt::Debug for BrowserContext {
@@ -165,12 +181,13 @@ impl BrowserContext {
             inner: Arc::new(ContextInner {
                 id,
                 browser,
+                ext: crate::context_ext::ContextExt::new(&options),
                 options,
                 timeouts: Arc::new(TimeoutSettings::new(None)),
                 pages: Mutex::new(Vec::new()),
                 init_scripts: Mutex::new(Vec::new()),
                 closed: AtomicBool::new(false),
-                ext: Default::default(),
+                emu: Default::default(),
             }),
         }
     }
@@ -201,16 +218,31 @@ impl BrowserContext {
 
     /// Wrap a chromiumoxide page of this context and track it.
     pub(crate) async fn adopt_page(&self, cdp: chromiumoxide::Page) -> Result<Page> {
+        self.adopt_page_with_opener(cdp, None).await
+    }
+
+    /// Like `adopt_page`, for a popup of `opener`.
+    pub(crate) async fn adopt_page_with_opener(
+        &self,
+        cdp: chromiumoxide::Page,
+        opener: Option<Weak<PageInner>>,
+    ) -> Result<Page> {
         let browser = self.browser_inner()?;
         let inner = PageInner::attach(cdp, Arc::downgrade(&browser), self).await?;
+        *inner.ext.opener.lock().unwrap() = opener;
         let page = Page::from_inner(inner);
         crate::emulation::init_page(&page).await?;
         let scripts = self.inner.init_scripts.lock().unwrap().clone();
         for script in scripts {
             page.inner.add_init_script_source(script).await?;
         }
+        crate::page_ext::initialize(&page, self).await?;
         browser.remember_page(&page);
         self.inner.pages.lock().unwrap().push(page.clone());
+        self.inner
+            .ext
+            .listeners
+            .emit(crate::events::Event::Page(page.clone()));
         Ok(page)
     }
 
@@ -289,6 +321,10 @@ impl BrowserContext {
 
     pub(crate) async fn close_impl(&self) -> Result<()> {
         async {
+            if self.inner.closed.load(Ordering::SeqCst) {
+                return Ok(());
+            }
+            let har = crate::har::flush_context(self).await;
             if self.inner.closed.swap(true, Ordering::SeqCst) {
                 return Ok(());
             }
@@ -312,7 +348,8 @@ impl BrowserContext {
             if let Some(browser) = browser {
                 browser.forget_context(self);
             }
-            Ok(())
+            self.emit_closed();
+            har
         }
         .await
         .api("browserContext.close")

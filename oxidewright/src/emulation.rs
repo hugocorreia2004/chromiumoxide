@@ -242,7 +242,7 @@ async fn send(page: &PageInner, method: &str, params: Value) -> Result<Value> {
 
 /// `Page.emulatedSize()`: the page override, else the context viewport.
 pub(crate) fn emulated_size(page: &PageInner) -> Option<EmulatedSize> {
-    if let Some(size) = *page.ext.emulated_size.lock().unwrap() {
+    if let Some(size) = *page.emu.emulated_size.lock().unwrap() {
         return Some(size);
     }
     let options = context_options(page)?;
@@ -269,7 +269,7 @@ pub(crate) async fn update_viewport(page: &PageInner) -> Result<()> {
         mobile,
         landscape: size.screen.width > size.screen.height,
     };
-    if *page.ext.metrics_override.lock().unwrap() == Some(metrics) {
+    if *page.emu.metrics_override.lock().unwrap() == Some(metrics) {
         return Ok(());
     }
     let orientation = if mobile {
@@ -295,20 +295,20 @@ pub(crate) async fn update_viewport(page: &PageInner) -> Result<()> {
         }),
     )
     .await?;
-    *page.ext.metrics_override.lock().unwrap() = Some(metrics);
+    *page.emu.metrics_override.lock().unwrap() = Some(metrics);
     *page.viewport.lock().unwrap() = Some(size.viewport);
     Ok(())
 }
 
 /// `page.setViewportSize`: the screen follows the viewport.
 pub(crate) async fn set_page_viewport(page: &PageInner, viewport: ViewportSize) -> Result<()> {
-    let old = *page.ext.emulated_size.lock().unwrap();
-    *page.ext.emulated_size.lock().unwrap() = Some(EmulatedSize {
+    let old = *page.emu.emulated_size.lock().unwrap();
+    *page.emu.emulated_size.lock().unwrap() = Some(EmulatedSize {
         viewport,
         screen: viewport,
     });
     if let Err(err) = update_viewport(page).await {
-        *page.ext.emulated_size.lock().unwrap() = old;
+        *page.emu.emulated_size.lock().unwrap() = old;
         return Err(err);
     }
     Ok(())
@@ -317,7 +317,7 @@ pub(crate) async fn set_page_viewport(page: &PageInner, viewport: ViewportSize) 
 /// `Page.emulatedMedia()` merged with the context options; `None` when no
 /// media feature is emulated at all.
 fn effective_media(page: &PageInner) -> Option<EmulatedMedia> {
-    let own = *page.ext.emulated_media.lock().unwrap();
+    let own = *page.emu.emulated_media.lock().unwrap();
     let options = context_options(page).unwrap_or_default();
     let merged = EmulatedMedia {
         media: own.media,
@@ -357,7 +357,7 @@ pub(crate) async fn update_geolocation(page: &PageInner, initial: bool) -> Resul
     let geolocation = page
         .context
         .upgrade()
-        .and_then(|c| *c.ext.geolocation.lock().unwrap());
+        .and_then(|c| *c.emu.geolocation.lock().unwrap());
     if !initial || geolocation.is_some() {
         let params = match geolocation {
             Some(g) => json!({
@@ -524,29 +524,11 @@ pub(crate) async fn init_page(page: &Page) -> Result<()> {
 }
 
 /// Context-level initialization (`BrowserContext._initialize` and
-/// `CRBrowserContext.initialize`): downloads, service workers, permissions
+/// `CRBrowserContext.initialize`): service workers, permissions
 /// and the initial storage state.
 pub(crate) async fn init_context(context: &BrowserContext) -> Result<()> {
     let options = context.inner.options.clone();
-    *context.inner.ext.geolocation.lock().unwrap() = options.geolocation;
-    if let Some(accept) = options.accept_downloads {
-        let mut params = serde_json::Map::new();
-        params.insert(
-            "behavior".into(),
-            json!(if accept { "allowAndName" } else { "deny" }),
-        );
-        if accept {
-            let dir = std::env::temp_dir().join("oxidewright-downloads");
-            params.insert("downloadPath".into(), json!(dir.to_string_lossy()));
-        }
-        params.insert("eventsEnabled".into(), json!(true));
-        if let Some(id) = &context.inner.id {
-            params.insert("browserContextId".into(), json!(id.as_ref()));
-        }
-        context
-            .browser_command("Browser.setDownloadBehavior", Value::Object(params))
-            .await?;
-    }
+    *context.inner.emu.geolocation.lock().unwrap() = options.geolocation;
     if options.service_workers == ServiceWorkerPolicy::Block {
         context
             .add_init_script(
@@ -599,7 +581,7 @@ impl BrowserContext {
             None => "*".to_string(),
         };
         let list = {
-            let mut map = self.inner.ext.permissions.lock().unwrap();
+            let mut map = self.inner.emu.permissions.lock().unwrap();
             let entry = map.entry(resolved.clone()).or_default();
             for p in permissions {
                 if !entry.contains(&p) {
@@ -656,7 +638,7 @@ impl BrowserContext {
     /// Remove all granted permissions.
     pub async fn clear_permissions(&self) -> Result<()> {
         async {
-            self.inner.ext.permissions.lock().unwrap().clear();
+            self.inner.emu.permissions.lock().unwrap().clear();
             let mut params = serde_json::Map::new();
             if let Some(id) = &self.inner.id {
                 params.insert("browserContextId".into(), json!(id.as_ref()));
@@ -676,7 +658,7 @@ impl BrowserContext {
             if let Some(g) = &geolocation {
                 g.verify()?;
             }
-            *self.inner.ext.geolocation.lock().unwrap() = geolocation;
+            *self.inner.emu.geolocation.lock().unwrap() = geolocation;
             for page in self.pages() {
                 update_geolocation(&page.inner, false).await?;
             }
@@ -779,9 +761,9 @@ impl IntoFuture for EmulateMedia {
     fn into_future(self) -> Self::IntoFuture {
         Box::pin(async move {
             let inner = &self.page.inner;
-            let old = *inner.ext.emulated_media.lock().unwrap();
+            let old = *inner.emu.emulated_media.lock().unwrap();
             {
-                let mut current = inner.ext.emulated_media.lock().unwrap();
+                let mut current = inner.emu.emulated_media.lock().unwrap();
                 let new = self.media;
                 if new.media.is_some() {
                     current.media = new.media;
@@ -801,7 +783,7 @@ impl IntoFuture for EmulateMedia {
             }
             let result = update_emulate_media(inner).await;
             if result.is_err() {
-                *inner.ext.emulated_media.lock().unwrap() = old;
+                *inner.emu.emulated_media.lock().unwrap() = old;
             }
             result.api("page.emulateMedia")
         })

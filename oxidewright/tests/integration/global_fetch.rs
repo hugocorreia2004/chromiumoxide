@@ -22,7 +22,7 @@ use std::time::Duration;
 use axum::body::Body;
 use axum::http::header;
 use axum::response::Response;
-use oxidewright::{HttpCredentials, HttpCredentialsSend};
+use oxidewright::fetch::{HttpCredentials, HttpCredentialsSend};
 use serde_json::json;
 
 use crate::common::*;

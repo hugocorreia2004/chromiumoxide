@@ -182,18 +182,6 @@ impl NewContext {
         self
     }
 
-    /// Ignore HTTPS errors.
-    pub fn ignore_https_errors(mut self, ignore: bool) -> Self {
-        self.options.ignore_https_errors = ignore;
-        self
-    }
-
-    /// Accept downloads (default `true`).
-    pub fn accept_downloads(mut self, accept: bool) -> Self {
-        self.options.accept_downloads = Some(accept);
-        self
-    }
-
     /// Make locators strict by default.
     pub fn strict_selectors(mut self, strict: bool) -> Self {
         self.options.strict_selectors = strict;

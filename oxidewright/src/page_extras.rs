@@ -1,4 +1,4 @@
-//! Smaller page/context APIs: `add_script_tag`, `add_style_tag`, `opener`,
+//! Smaller page/context APIs: `add_script_tag`, `add_style_tag`,
 //! `close` with `run_before_unload`/`reason`.
 
 use std::future::{Future, IntoFuture};
@@ -206,38 +206,6 @@ impl Page {
         tag.api = "page.addStyleTag";
         tag
     }
-
-    /// The page that opened this one (popups), if it is still open.
-    pub async fn opener(&self) -> Result<Option<Page>> {
-        async {
-            let browser = self
-                .inner
-                .browser
-                .upgrade()
-                .ok_or_else(Error::target_closed)?;
-            let info = browser
-                .execute_with_session(
-                    RawCommand::new(
-                        "Target.getTargetInfo",
-                        json!({ "targetId": self.inner.cdp.target_id().as_ref() }),
-                    ),
-                    None,
-                )
-                .await?;
-            let Some(opener) = info
-                .get("targetInfo")
-                .and_then(|t| t.get("openerId"))
-                .and_then(Value::as_str)
-            else {
-                return Ok(None);
-            };
-            Ok(browser
-                .page_by_target_id(opener)
-                .filter(|page| !page.is_closed()))
-        }
-        .await
-        .api("page.opener")
-    }
 }
 
 /// Builder returned by [`Page::close`]; `.await` it.
@@ -284,7 +252,7 @@ impl IntoFuture for ClosePage {
                     .api("page.close");
             }
             if let Some(reason) = &self.reason {
-                *self.page.inner.ext.close_reason.lock().unwrap() = Some(reason.clone());
+                *self.page.inner.emu.close_reason.lock().unwrap() = Some(reason.clone());
             }
             self.page.close_impl().await
         })
@@ -312,7 +280,7 @@ impl IntoFuture for CloseContext {
     fn into_future(self) -> Self::IntoFuture {
         Box::pin(async move {
             if let Some(reason) = &self.reason {
-                *self.context.inner.ext.close_reason.lock().unwrap() = Some(reason.clone());
+                *self.context.inner.emu.close_reason.lock().unwrap() = Some(reason.clone());
             }
             self.context.close_impl().await
         })
@@ -322,7 +290,7 @@ impl IntoFuture for CloseContext {
 impl BrowserContext {
     /// The reason passed to `close().reason(..)`, if any.
     pub fn close_reason(&self) -> Option<String> {
-        self.inner.ext.close_reason.lock().unwrap().clone()
+        self.inner.emu.close_reason.lock().unwrap().clone()
     }
 }
 
@@ -331,7 +299,7 @@ impl Page {
     /// context), if any.
     pub fn close_reason(&self) -> Option<String> {
         self.inner
-            .ext
+            .emu
             .close_reason
             .lock()
             .unwrap()

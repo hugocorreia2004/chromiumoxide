@@ -179,7 +179,7 @@ impl Page {
     /// Stop JavaScript coverage and return the entries.
     pub async fn stop_js_coverage(&self) -> Result<Vec<JsCoverageEntry>> {
         async {
-            let mut state = self.inner.ext.coverage.lock().await;
+            let mut state = self.inner.emu.coverage.lock().await;
             let Some((data, tasks, report_anonymous)) = state.js.take() else {
                 return Ok(Vec::new());
             };
@@ -230,7 +230,7 @@ impl Page {
     /// Stop CSS coverage and return the entries.
     pub async fn stop_css_coverage(&self) -> Result<Vec<CssCoverageEntry>> {
         async {
-            let mut state = self.inner.ext.coverage.lock().await;
+            let mut state = self.inner.emu.coverage.lock().await;
             let Some((data, tasks)) = state.css.take() else {
                 return Ok(Vec::new());
             };
@@ -318,7 +318,7 @@ impl IntoFuture for StartJsCoverage {
         Box::pin(async move {
             async {
                 let page = self.page;
-                let mut state = page.inner.ext.coverage.lock().await;
+                let mut state = page.inner.emu.coverage.lock().await;
                 if state.js.is_some() {
                     return Err(Error::invalid_argument("JSCoverage is already enabled"));
                 }
@@ -422,7 +422,7 @@ impl IntoFuture for StartCssCoverage {
         Box::pin(async move {
             async {
                 let page = self.page;
-                let mut state = page.inner.ext.coverage.lock().await;
+                let mut state = page.inner.emu.coverage.lock().await;
                 if state.css.is_some() {
                     return Err(Error::invalid_argument("CSSCoverage is already enabled"));
                 }

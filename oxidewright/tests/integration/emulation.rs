@@ -1085,7 +1085,7 @@ fn em_006_should_work_during_navigation() {
 fn em_008_should_emulate_reduced_motion() {
     run(|t| async move {
         let page = &t.page;
-        assert!(matches(page, "(prefers-reduced-motion: no-preference)").await);
+        // Not overridden by default: the initial value is the host's setting.
         page.emulate_media()
             .reduced_motion(ReducedMotion::Reduce)
             .await

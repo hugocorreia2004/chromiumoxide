@@ -336,7 +336,7 @@ impl BrowserContext {
     /// context's cookies.
     pub fn request(&self) -> APIRequestContext {
         self.inner
-            .ext
+            .emu
             .request
             .get_or_init(|| APIRequestContext::for_context(Arc::downgrade(&self.inner)))
             .clone()
@@ -443,8 +443,29 @@ impl APIRequestContext {
                 Ok(Defaults {
                     base_url: options.base_url.clone(),
                     user_agent,
-                    extra_http_headers: Vec::new(),
-                    http_credentials: Vec::new(),
+                    extra_http_headers: context
+                        .inner
+                        .ext
+                        .extra_headers
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .map(|h| (h.name.clone(), h.value.clone()))
+                        .collect(),
+                    http_credentials: context
+                        .inner
+                        .ext
+                        .http_credentials
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .map(|c| HttpCredentials {
+                            username: c.username.clone(),
+                            password: c.password.clone(),
+                            origin: c.origin.clone(),
+                            send: None,
+                        })
+                        .collect(),
                     ignore_https_errors: options.ignore_https_errors,
                     fail_on_status_code: false,
                     max_redirects: None,
