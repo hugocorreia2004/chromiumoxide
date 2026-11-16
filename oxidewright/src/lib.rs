@@ -37,6 +37,7 @@
 // CDP parameter structs are built with `Default` and then filled in.
 #![allow(clippy::field_reassign_with_default)]
 
+pub mod actions;
 mod browser;
 mod browser_context;
 mod browser_type;
@@ -44,6 +45,7 @@ mod element_actions;
 mod error;
 pub mod execution_context;
 mod frame;
+mod frame_selectors;
 pub mod input;
 pub mod js;
 mod js_handle;
@@ -57,9 +59,15 @@ mod selector_parser;
 mod selectors;
 mod url_match;
 
+pub use actions::{
+    Action, BoundingBox, Click, Dblclick, ElementState, FilePayload, Fill, Hover, InputFiles,
+    Position, Press, SelectOption, SelectOptionAction, SelectValue, SelectValues, SetChecked,
+    SetInputFiles, Tap, Type, WaitForSelector, kinds,
+};
 pub use browser::Browser;
 pub use browser_context::{BrowserContext, NewContext, NewContextOptions};
 pub use browser_type::{BrowserType, ConnectOverCdp, Launch, LaunchOptions, chromium};
+pub use element_actions::WaitForSelectorState;
 pub use error::{CONTEXT_DESTROYED_MESSAGE, Error, Result, TARGET_CLOSED_MESSAGE};
 pub use execution_context::{ExecutionContext, World};
 pub use frame::{
@@ -71,8 +79,11 @@ pub use input::{
     MouseClick, MouseMove, Touchscreen,
 };
 pub use js::JsValue;
-pub use locator_utils::{JsRegex, TextMatch, regex};
 pub use js_handle::{ElementHandle, EvaluateHandleOn, EvaluateOn, JSHandle};
+pub use locator::{
+    FrameLocator, GetByOptions, GetByRoleOptions, Locator, LocatorOptions, SelectorOrLocator,
+};
+pub use locator_utils::{JsRegex, TextMatch, regex};
 pub use network::{Request, Response};
 pub use page::{AddInitScript, GoHistory, InitScript, Page, Reload, ViewportSize};
 pub use progress::DEFAULT_TIMEOUT;

@@ -86,6 +86,11 @@ impl Progress {
         }
     }
 
+    /// The timeout of this operation in milliseconds (`0` = none).
+    pub(crate) fn timeout(&self) -> u64 {
+        self.timeout
+    }
+
     /// Add a line to the call log.
     pub(crate) fn log(&self, line: impl Into<String>) {
         let line = line.into();

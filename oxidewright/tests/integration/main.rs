@@ -1,6 +1,7 @@
 //! Integration tests, ported from Playwright's `tests/page/*.spec.ts`.
 //! Test names follow the original test titles.
 
+mod actions_smoke;
 mod browser;
 mod common;
 mod content;

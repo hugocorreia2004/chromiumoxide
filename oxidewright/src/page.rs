@@ -84,6 +84,8 @@ impl PartialEq for Page {
 #[derive(Clone)]
 pub(crate) enum PageEvent {
     Navigated(NavigationEvent),
+    /// `Page.frameRequestedNavigation` (current tab) for a frame.
+    NavigationRequested(String),
     Lifecycle(String, LoadState),
     #[allow(dead_code)] // consumed by the events API
     FrameAttached(String),
@@ -1022,8 +1024,12 @@ impl PageInner {
         let any = match any.downcast::<EventFrameRequestedNavigation>() {
             Ok(ev) => {
                 if ev.disposition == ClientNavigationDisposition::CurrentTab {
-                    let mut state = self.tree.lock().unwrap();
-                    self.requested_navigation(&mut state, ev.frame_id.as_ref(), None);
+                    self.with_effects(|this, state, fx| {
+                        this.requested_navigation(state, ev.frame_id.as_ref(), None);
+                        fx.events.push(PageEvent::NavigationRequested(
+                            ev.frame_id.as_ref().to_string(),
+                        ));
+                    });
                 }
                 return;
             }

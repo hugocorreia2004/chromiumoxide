@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <title>Button test</title>
+  </head>
+  <body>
+    <script src="mouse-helper.js"></script>
+    <button onclick="clicked();">Click target</button>
+    <script>
+      window.result = 'Was not clicked';
+      window.offsetX = undefined;
+      window.offsetY = undefined;
+      window.pageX = undefined;
+      window.pageY = undefined;
+      window.shiftKey = undefined;
+      window.bubbles = undefined;
+      window.cancelable = undefined;
+      window.composed = undefined;
+      document.querySelector('button').addEventListener('click', e => {
+        result = 'Clicked';
+        offsetX = e.offsetX;
+        offsetY = e.offsetY;
+        pageX = e.pageX;
+        pageY = e.pageY;
+        shiftKey = e.shiftKey;
+        bubbles = e.bubbles;
+        cancelable = e.cancelable;
+        composed = e.composed;
+      }, false);
+      function clicked() {
+        result = 'Clicked';
+      }
+    </script>
+  </body>
+</html>
