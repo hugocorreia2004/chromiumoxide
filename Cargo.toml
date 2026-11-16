@@ -80,4 +80,5 @@ members = [
   "chromiumoxide_types",
   "chromiumoxide_cdp",
   "chromiumoxide_fetcher",
+  "oxidewright",
 ]
