@@ -83,6 +83,13 @@ impl PausedRequest {
         self.event.as_ref()
     }
 
+    /// The CDP session the request was paused in (the page's own session or
+    /// the session of an out-of-process frame), for sending other `Fetch`
+    /// commands such as `Fetch.getResponseBody` or `Fetch.continueResponse`.
+    pub fn session_id(&self) -> &SessionId {
+        &self.session_id
+    }
+
     /// Continues the request without overriding any request fields.
     pub async fn continue_request(self) -> Result<()> {
         self.continue_with(ContinueRequestOverrides::default())

@@ -37,7 +37,15 @@ pub(crate) struct BrowserInner {
     launched: bool,
     version: String,
     profile_dir: Option<PathBuf>,
+    /// Downloads and other extensions.
+    pub(crate) ext: BrowserExt,
     self_weak: Weak<BrowserInner>,
+}
+
+/// Extra state of a browser.
+#[derive(Default)]
+pub(crate) struct BrowserExt {
+    pub(crate) downloads: crate::download::BrowserDownloads,
 }
 
 impl fmt::Debug for Browser {
@@ -86,6 +94,7 @@ impl BrowserInner {
             launched,
             version,
             profile_dir,
+            ext: BrowserExt::default(),
             self_weak: weak.clone(),
         });
         // Watch the handler: when it ends, the connection is gone.
@@ -116,6 +125,10 @@ impl BrowserInner {
                 }
             });
             *inner.listener.lock().unwrap() = Some(listener);
+        }
+        if let Some(cdp) = inner.cdp.read().await.as_ref() {
+            crate::download::start(&inner, cdp).await;
+            crate::page_ext::start_target_listener(&inner, cdp).await;
         }
         Ok(inner)
     }
@@ -163,6 +176,35 @@ impl BrowserInner {
         );
     }
 
+    /// The open pages of the browser.
+    pub(crate) fn live_pages(&self) -> Vec<Arc<PageInner>> {
+        self.pages
+            .lock()
+            .unwrap()
+            .values()
+            .filter_map(Weak::upgrade)
+            .collect()
+    }
+
+    /// The page of a target.
+    pub(crate) fn page_by_target(&self, target_id: &str) -> Option<Arc<PageInner>> {
+        self.pages
+            .lock()
+            .unwrap()
+            .get(target_id)
+            .and_then(Weak::upgrade)
+    }
+
+    /// The chromiumoxide page of a target, if attached.
+    pub(crate) async fn get_cdp_page(
+        &self,
+        target_id: chromiumoxide::cdp::browser_protocol::target::TargetId,
+    ) -> Result<chromiumoxide::Page> {
+        let guard = self.cdp.read().await;
+        let browser = guard.as_ref().ok_or_else(Error::target_closed)?;
+        Ok(browser.get_page(target_id).await?)
+    }
+
     pub(crate) fn forget_page(&self, target_id: &str) {
         self.pages.lock().unwrap().remove(target_id);
     }
@@ -185,6 +227,8 @@ impl BrowserInner {
             .await?
             .browser_context_id;
         let context = BrowserContext::new(Some(id), self.self_weak.clone(), options);
+        crate::download::configure_context(&context).await?;
+        crate::har::start_context_recording(&context)?;
         self.contexts.lock().unwrap().push(context.clone());
         Ok(context)
     }
@@ -196,7 +240,7 @@ impl BrowserInner {
             self.self_weak.clone(),
             NewContextOptions {
                 viewport: None,
-                base_url: None,
+                ..NewContextOptions::default()
             },
         );
         *self.default_context.lock().unwrap() = Some(context.clone());
