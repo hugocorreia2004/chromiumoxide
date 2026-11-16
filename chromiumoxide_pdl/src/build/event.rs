@@ -140,13 +140,29 @@ impl<'a> EventBuilder<'a> {
 
             });
 
+            // An event whose params do not match this protocol revision is
+            // kept as `CdpEvent::Other` (raw JSON) instead of failing the
+            // whole message, so the session id and method still reach the
+            // handler and custom listeners.
             let deserialize_from = if event.needs_box {
                 quote! {
-                        #ty_qualifier::IDENTIFIER =>CdpEvent::#var_ident(Box::new(map.next_value::<#ty_qualifier>()?)),
+                        #ty_qualifier::IDENTIFIER => {
+                            let value = map.next_value::<serde_json::Value>()?;
+                            match <#ty_qualifier as Deserialize>::deserialize(&value) {
+                                Ok(event) => CdpEvent::#var_ident(Box::new(event)),
+                                Err(_) => CdpEvent::Other(value),
+                            }
+                        }
                 }
             } else {
                 quote! {
-                        #ty_qualifier::IDENTIFIER =>CdpEvent::#var_ident(map.next_value::<#ty_qualifier>()?),
+                        #ty_qualifier::IDENTIFIER => {
+                            let value = map.next_value::<serde_json::Value>()?;
+                            match <#ty_qualifier as Deserialize>::deserialize(&value) {
+                                Ok(event) => CdpEvent::#var_ident(event),
+                                Err(_) => CdpEvent::Other(value),
+                            }
+                        }
                 }
             };
 

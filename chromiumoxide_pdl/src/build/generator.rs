@@ -58,6 +58,9 @@ pub struct Generator {
     with_experimental: bool,
     with_deprecated: bool,
     allowed_deprecated_type: HashSet<String>,
+    /// Qualified type names (`<Domain>.<Type>`) whose `Default` impl is
+    /// written by hand next to the generated code, so no `Default` is derived.
+    custom_default_types: HashSet<String>,
     out_dir: Option<PathBuf>,
     protocol_mods: Vec<String>,
     domains: HashMap<String, usize>,
@@ -81,6 +84,7 @@ impl Default for Generator {
             with_experimental: true,
             with_deprecated: false,
             allowed_deprecated_type: HashSet::new(),
+            custom_default_types: HashSet::new(),
             out_dir: None,
             protocol_mods: Vec::new(),
             domains: Default::default(),
@@ -132,6 +136,16 @@ impl Generator {
     /// Configures a type name that is allowed to be deprecated.
     pub fn allowed_deprecated_type(&mut self, type_name: impl Into<String>) -> &mut Self {
         self.allowed_deprecated_type.insert(type_name.into());
+        self
+    }
+
+    /// Configures a type (`<Domain>.<Type>`, e.g. `Target.CreateTargetParams`)
+    /// that implements `Default` by hand, so the generator must not derive it.
+    ///
+    /// Every other generated struct and enum derives `Default`, which is what
+    /// lets missing fields fall back to a default during deserialization.
+    pub fn custom_default_type(&mut self, type_name: impl Into<String>) -> &mut Self {
+        self.custom_default_types.insert(type_name.into());
         self
     }
 
@@ -367,26 +381,31 @@ impl Generator {
             #modules
 
             pub mod de {
-                use serde::{de, Deserialize, Deserializer};
+                use serde::{Deserialize, Deserializer};
                 use std::str::FromStr;
 
-                /// Use the `FromStr` implementation to serialize an optional value
+                /// Use the `FromStr` implementation to deserialize an optional value.
+                ///
+                /// A `null` or a value unknown to this protocol revision becomes `None`.
                 pub fn deserialize_from_str_optional<'de, D, T>(data: D) -> Result<Option<T>, D::Error>
                     where
                         D: Deserializer<'de>,
                         T: FromStr<Err = String>,
                 {
-                    deserialize_from_str(data).map(Some)
+                    let s: Option<String> = Deserialize::deserialize(data)?;
+                    Ok(s.and_then(|s| T::from_str(&s).ok()))
                 }
 
-                /// Use the `FromStr` implementation to serialize a value
+                /// Use the `FromStr` implementation to deserialize a value.
+                ///
+                /// A `null` or a value unknown to this protocol revision becomes `T::default()`.
                 pub fn deserialize_from_str<'de, D, T>(data: D) -> Result<T, D::Error>
                     where
                         D: Deserializer<'de>,
-                        T: FromStr<Err = String>,
+                        T: FromStr<Err = String> + Default,
                 {
-                    let s: String = Deserialize::deserialize(data)?;
-                    T::from_str(&s).map_err(de::Error::custom)
+                    let s: Option<String> = Deserialize::deserialize(data)?;
+                    Ok(s.and_then(|s| T::from_str(&s).ok()).unwrap_or_default())
                 }
             }
         };
@@ -638,10 +657,17 @@ impl Generator {
 
         self.apply_struct_fixup(&mut builder, dt);
 
-        let derives = if !builder.has_mandatory_types() {
-            quote! { #[derive(Debug, Clone, PartialEq, Default)]}
-        } else {
+        // Every type derives `Default` (unless it is implemented by hand) so
+        // that `#[serde(default)]` can fill in fields a browser omits, for
+        // example experimental fields that other CDP implementations do not
+        // send. This follows the approach of spider-rs/chromey.
+        let custom_default = self
+            .custom_default_types
+            .contains(&format!("{}.{}", domain.name, struct_ident));
+        let derives = if custom_default {
             quote! {#[derive(Debug, Clone, PartialEq)] }
+        } else {
+            quote! { #[derive(Debug, Clone, PartialEq, Default)]}
         };
 
         let serde_derives = self.serde_support.generate_derives();
@@ -726,6 +752,7 @@ impl Generator {
                 })
             }
         } else {
+            stream.extend(self.serde_support.generate_struct_default_attr());
             let struct_def = builder.generate_struct_def();
             stream.extend(quote! {
                 #struct_def
@@ -753,9 +780,14 @@ impl Generator {
 
         self.type_size.insert(enum_name, 16);
 
-        let vars = variants
-            .iter()
-            .map(|v| self.serde_support.generate_variant(v));
+        let vars = variants.iter().enumerate().map(|(i, v)| {
+            let variant = self.serde_support.generate_variant(v);
+            if i == 0 {
+                quote! { #[default] #variant }
+            } else {
+                variant
+            }
+        });
 
         let desc = if let Some(desc) = ident.description.as_ref() {
             quote! {
@@ -765,11 +797,11 @@ impl Generator {
             TokenStream::default()
         };
 
-        let attr = self.serde_support.generate_derives();
+        let attr = self.serde_support.generate_serialize_derive();
 
         let ty_def = quote! {
             #desc
-            #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+            #[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
             #attr
             pub enum #name {
                 #(#vars),*
@@ -799,10 +831,12 @@ impl Generator {
             .collect();
 
         let str_fns = generate_enum_str_fns(&name, &vars, &str_values);
+        let lenient_de = self.serde_support.generate_lenient_enum_deserialize(&name);
 
         quote! {
             #ty_def
             #str_fns
+            #lenient_de
         }
     }
 
@@ -1097,6 +1131,62 @@ impl SerdeSupport {
         }
     }
 
+    /// Only `Serialize`: enums get a hand-written, lenient `Deserialize`.
+    fn generate_serialize_derive(&self) -> TokenStream {
+        match self {
+            SerdeSupport::None => TokenStream::default(),
+            SerdeSupport::Default => quote! {
+                #[derive(Serialize)]
+            },
+            SerdeSupport::Feature(feature) => {
+                quote! {
+                    #[cfg_attr(feature = #feature, derive(Serialize))]
+                }
+            }
+        }
+    }
+
+    /// A `Deserialize` impl for a protocol enum that maps a value this
+    /// protocol revision does not know (a newer browser, or another CDP
+    /// implementation) to the enum's default instead of failing the whole
+    /// message. Optional enum fields use `de::deserialize_from_str_optional`,
+    /// which maps an unknown value to `None` instead.
+    fn generate_lenient_enum_deserialize(&self, name: &Ident) -> TokenStream {
+        let imp = quote! {
+            impl<'de> Deserialize<'de> for #name {
+                fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+                where
+                    D: serde::Deserializer<'de>,
+                {
+                    let s = String::deserialize(deserializer)?;
+                    Ok(s.parse().unwrap_or_default())
+                }
+            }
+        };
+        match self {
+            SerdeSupport::None => TokenStream::default(),
+            SerdeSupport::Default => imp,
+            SerdeSupport::Feature(feature) => quote! {
+                #[cfg(feature = #feature)]
+                #imp
+            },
+        }
+    }
+
+    pub(crate) fn generate_struct_default_attr(&self) -> TokenStream {
+        match self {
+            SerdeSupport::None => TokenStream::default(),
+            SerdeSupport::Default => quote! {
+                #[serde(default)]
+            },
+            SerdeSupport::Feature(feature) => {
+                quote! {
+                    #[cfg_attr(feature = #feature, serde(default))]
+                }
+            }
+        }
+    }
+
     pub(crate) fn generate_opt_field_attr(&self) -> TokenStream {
         match self {
             SerdeSupport::None => TokenStream::default(),
@@ -1106,20 +1196,6 @@ impl SerdeSupport {
             SerdeSupport::Feature(feature) => {
                 quote! {
                      #[cfg_attr(feature = #feature, serde(skip_serializing_if = "Option::is_none"))]
-                }
-            }
-        }
-    }
-
-    pub(crate) fn generate_vec_field_attr(&self) -> TokenStream {
-        match self {
-            SerdeSupport::None => TokenStream::default(),
-            SerdeSupport::Default => quote! {
-                 #[serde(skip_serializing_if = "Vec::is_empty")]
-            },
-            SerdeSupport::Feature(feature) => {
-                quote! {
-                     #[cfg_attr(feature = #feature, serde(skip_serializing_if = "Vec::is_empty"))]
                 }
             }
         }
