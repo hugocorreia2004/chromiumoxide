@@ -182,6 +182,10 @@ pub struct Target {
     initiator_deadline: Option<Instant>,
     /// Page-facing waiters for a lifecycle event of the main frame.
     lifecycle_waiters: Vec<(MethodId, Sender<Result<ArcHttpRequest>>)>,
+    /// Pinned execution-context queries for a frame that is still bound to
+    /// the queried session but whose session is still initializing or whose
+    /// context the browser has not reported yet.
+    pending_context_queries: Vec<PendingContextQuery>,
     /// Notified once this target is torn down.
     close_waiters: Vec<Sender<()>>,
 }
@@ -219,6 +223,7 @@ impl Target {
             initiator: None,
             initiator_deadline: None,
             lifecycle_waiters: Vec::new(),
+            pending_context_queries: Vec::new(),
             close_waiters: Vec::new(),
             browser_context,
         }
@@ -323,6 +328,86 @@ impl Target {
                 .frame_manager
                 .frame(frame_id)
                 .is_some_and(|frame| frame.session_id() == Some(session_id))
+    }
+
+    /// Where the binding of a frame to the session a caller pinned stands.
+    ///
+    /// A frame that was removed, moved to another session, or whose session
+    /// is draining or failed to initialize is stale for that caller. A frame
+    /// still bound to a child session that is initializing is not: an
+    /// out-of-process iframe is listed as soon as its frame tree arrives,
+    /// before its session finished initializing and before the browser
+    /// reported its contexts.
+    fn pinned_frame_binding(&self, frame_id: &FrameId, session_id: &SessionId) -> PinnedBinding {
+        let bound = self
+            .frame_manager
+            .frame(frame_id)
+            .is_some_and(|frame| frame.session_id() == Some(session_id));
+        if !bound || self.is_session_draining(session_id) {
+            return PinnedBinding::Stale;
+        }
+        if self.session_id() == Some(session_id) {
+            return PinnedBinding::Ready;
+        }
+        if !self.frame_manager.is_child_session(session_id) {
+            return PinnedBinding::Stale;
+        }
+        match self.iframe_init_states.get(session_id) {
+            None | Some(IframeInitState::Done) => PinnedBinding::Ready,
+            Some(IframeInitState::Failed) => PinnedBinding::Stale,
+            Some(_) => PinnedBinding::Initializing,
+        }
+    }
+
+    /// Answer a query waiting for a frame's execution context or isolated
+    /// world, or hand it back when it has to keep waiting.
+    ///
+    /// A stale handle fails at once with `FrameNotReady`; a frame still bound
+    /// to the queried session waits for its session to finish initializing
+    /// and, for a pinned context, for the browser to report the context.
+    fn try_resolve_context_query(&self, query: PendingContextQuery) -> Option<PendingContextQuery> {
+        if query.is_canceled() {
+            return None;
+        }
+        match self.pinned_frame_binding(&query.frame_id, &query.session_id) {
+            PinnedBinding::Stale => {
+                query.fail(CdpError::FrameNotReady);
+                None
+            }
+            PinnedBinding::Initializing => Some(query),
+            PinnedBinding::Ready => match query.answer {
+                ContextQueryAnswer::Pinned { dom_world, tx } => {
+                    let context_id =
+                        self.frame_manager.frame(&query.frame_id).and_then(
+                            |frame| match dom_world {
+                                DOMWorldKind::Main => frame.main_world().execution_context(),
+                                DOMWorldKind::Secondary => {
+                                    frame.secondary_world().execution_context()
+                                }
+                            },
+                        );
+                    match context_id {
+                        Some(context_id) => {
+                            let _ = tx.send(Ok(Some(ExecutionContextInfo {
+                                context_id,
+                                session_id: query.session_id,
+                            })));
+                            None
+                        }
+                        None => Some(PendingContextQuery {
+                            answer: ContextQueryAnswer::Pinned { dom_world, tx },
+                            ..query
+                        }),
+                    }
+                }
+                ContextQueryAnswer::IsolatedWorld { tx } => {
+                    let _ = tx.send(
+                        self.isolated_world_slot(Some(query.frame_id), Some(query.session_id)),
+                    );
+                    None
+                }
+            },
+        }
     }
 
     /// Resolve the isolated-world slot of a frame for a page-side caller.
@@ -1188,6 +1273,9 @@ impl Target {
         for (_, tx) in mem::take(&mut self.lifecycle_waiters) {
             let _ = tx.send(Err(CdpError::TargetClosed));
         }
+        for query in mem::take(&mut self.pending_context_queries) {
+            query.fail(CdpError::TargetClosed);
+        }
         self.frame_manager.clear_isolated_world_registrations();
         if let Some(initiator) = self.initiator.take() {
             let _ = initiator.send(Err(CdpError::TargetClosed));
@@ -1338,7 +1426,14 @@ impl Target {
                         .on_frame_attached(ev.frame_id.clone(), Some(ev.parent_frame_id.clone()));
                 }
             }
-            CdpEvent::PageFrameDetached(ev) => self.frame_manager.on_frame_detached(ev),
+            CdpEvent::PageFrameDetached(ev) => {
+                if let Some(session_id) = event_session_id.clone() {
+                    self.frame_manager
+                        .on_frame_detached_in_session(ev, session_id);
+                } else {
+                    self.frame_manager.on_frame_detached(ev);
+                }
+            }
             CdpEvent::PageFrameNavigated(ev) => {
                 if let Some(session_id) = event_session_id.clone() {
                     self.frame_manager
@@ -1702,6 +1797,13 @@ impl Target {
                         let _ = tx.send(Ok(frame.http_request().cloned()));
                     }
                 }
+                if !self.pending_context_queries.is_empty() {
+                    for query in mem::take(&mut self.pending_context_queries) {
+                        if let Some(query) = self.try_resolve_context_query(query) {
+                            self.pending_context_queries.push(query);
+                        }
+                    }
+                }
                 if !self.lifecycle_waiters.is_empty() {
                     for (event, tx) in mem::take(&mut self.lifecycle_waiters) {
                         if tx.is_canceled() {
@@ -1911,7 +2013,29 @@ impl Target {
                         expected_session_id,
                         tx,
                     } => {
-                        let _ = tx.send(self.isolated_world_slot(frame_id, expected_session_id));
+                        // A pinned caller waits while its frame's session is
+                        // still initializing, like a pinned context query.
+                        let frame_id = frame_id.or_else(|| {
+                            self.frame_manager
+                                .main_frame()
+                                .map(|frame| frame.id().clone())
+                        });
+                        match (frame_id, expected_session_id) {
+                            (Some(frame_id), Some(session_id)) => {
+                                let query = PendingContextQuery {
+                                    frame_id,
+                                    session_id,
+                                    answer: ContextQueryAnswer::IsolatedWorld { tx },
+                                };
+                                if let Some(query) = self.try_resolve_context_query(query) {
+                                    self.pending_context_queries.push(query);
+                                }
+                            }
+                            (frame_id, expected_session_id) => {
+                                let _ = tx
+                                    .send(self.isolated_world_slot(frame_id, expected_session_id));
+                            }
+                        }
                     }
                     InternalTargetMessage::StoreIsolatedWorld { slot, context_id } => {
                         self.frame_manager.store_isolated_world(
@@ -1949,23 +2073,14 @@ impl Target {
                         expected_session_id,
                         tx,
                     } => {
-                        if !self.frame_ready(&frame_id, &expected_session_id) {
-                            let _ = tx.send(Err(CdpError::FrameNotReady));
-                            continue;
-                        }
-                        let context_id =
-                            self.frame_manager
-                                .frame(&frame_id)
-                                .and_then(|frame| match dom_world {
-                                    DOMWorldKind::Main => frame.main_world().execution_context(),
-                                    DOMWorldKind::Secondary => {
-                                        frame.secondary_world().execution_context()
-                                    }
-                                });
-                        let _ = tx.send(Ok(context_id.map(|context_id| ExecutionContextInfo {
-                            context_id,
+                        let query = PendingContextQuery {
+                            frame_id,
                             session_id: expected_session_id,
-                        })));
+                            answer: ContextQueryAnswer::Pinned { dom_world, tx },
+                        };
+                        if let Some(query) = self.try_resolve_context_query(query) {
+                            self.pending_context_queries.push(query);
+                        }
                     }
                     InternalTargetMessage::GetFrameInfo { frame_id, tx } => {
                         let info = self
@@ -2245,6 +2360,58 @@ pub(crate) struct FanOutAckBatch {
     pub(crate) send_only_reqs: Vec<Request>,
     pub(crate) ack_tx: Sender<Result<()>>,
     pub(crate) main_session_id: SessionId,
+}
+
+/// Where the binding of a frame to a caller's pinned session stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PinnedBinding {
+    /// The frame is gone, moved to another session, or its session is
+    /// draining or failed to initialize.
+    Stale,
+    /// The frame is bound to the session, which is still initializing.
+    Initializing,
+    /// The frame is bound to the session, which is ready for commands.
+    Ready,
+}
+
+/// A query for a frame's execution context or isolated world that waits for
+/// the frame's session (and context) to become available.
+#[derive(Debug)]
+struct PendingContextQuery {
+    frame_id: FrameId,
+    session_id: SessionId,
+    answer: ContextQueryAnswer,
+}
+
+#[derive(Debug)]
+enum ContextQueryAnswer {
+    Pinned {
+        dom_world: DOMWorldKind,
+        tx: Sender<Result<Option<ExecutionContextInfo>>>,
+    },
+    IsolatedWorld {
+        tx: Sender<Result<IsolatedWorldSlot>>,
+    },
+}
+
+impl PendingContextQuery {
+    fn is_canceled(&self) -> bool {
+        match &self.answer {
+            ContextQueryAnswer::Pinned { tx, .. } => tx.is_canceled(),
+            ContextQueryAnswer::IsolatedWorld { tx } => tx.is_canceled(),
+        }
+    }
+
+    fn fail(self, error: CdpError) {
+        match self.answer {
+            ContextQueryAnswer::Pinned { tx, .. } => {
+                let _ = tx.send(Err(error));
+            }
+            ContextQueryAnswer::IsolatedWorld { tx } => {
+                let _ = tx.send(Err(error));
+            }
+        }
+    }
 }
 
 /// Session-qualified execution context returned to frame-pinned callers.
@@ -3719,6 +3886,144 @@ mod tests {
         assert!(matches!(
             poll_target(&mut target, Instant::now()),
             Some(TargetEvent::Command(command)) if command.is_navigation()
+        ));
+    }
+
+    fn query_pinned_context(
+        target: &mut Target,
+        frame_id: &str,
+        session_id: &SessionId,
+    ) -> oneshot::Receiver<Result<Option<ExecutionContextInfo>>> {
+        let (tx, rx) = oneshot::channel();
+        send_internal(
+            target,
+            InternalTargetMessage::GetPinnedExecutionContext {
+                dom_world: DOMWorldKind::Main,
+                frame_id: FrameId::new(frame_id),
+                expected_session_id: session_id.clone(),
+                tx,
+            },
+        );
+        let _ = poll_target(target, Instant::now());
+        rx
+    }
+
+    #[test]
+    fn pinned_context_query_waits_for_a_bound_frames_context() {
+        let (mut target, main_session) = initialized_target();
+        let child_session = session("child");
+        target.frame_manager.on_frame_attached_in_session(
+            FrameId::new("oop-frame"),
+            Some(FrameId::new("main-frame")),
+            child_session.clone(),
+        );
+
+        // The frame is listed but its context is not reported yet: the query
+        // waits instead of failing.
+        let mut pending = query_pinned_context(&mut target, "oop-frame", &child_session);
+        assert!(matches!(pending.try_recv(), Ok(None)));
+        let _ = poll_target(&mut target, Instant::now());
+        assert!(matches!(pending.try_recv(), Ok(None)));
+
+        // A handle pinned to a session the frame is not bound to is stale.
+        let stale = query_pinned_context(&mut target, "oop-frame", &main_session);
+        assert!(matches!(
+            block_on(stale).expect("stale query is answered"),
+            Err(CdpError::FrameNotReady)
+        ));
+
+        target
+            .frame_manager
+            .on_frame_execution_context_created_in_session(
+                &execution_context("oop-frame", 3, "child-context"),
+                child_session.clone(),
+            );
+        let _ = poll_target(&mut target, Instant::now());
+        let context = block_on(pending)
+            .expect("pending query is answered")
+            .expect("frame is ready")
+            .expect("context exists");
+        assert_eq!(context.context_id, ExecutionContextId::new(3));
+        assert_eq!(context.session_id, child_session);
+    }
+
+    #[test]
+    fn frame_queries_wait_for_an_initializing_child_session() {
+        let (mut target, _) = initialized_target();
+        let child_session = session("child");
+        install_child(&mut target, "child-frame", &child_session);
+        target
+            .frame_manager
+            .on_frame_execution_context_created_in_session(
+                &execution_context("child-frame", 4, "child-context"),
+                child_session.clone(),
+            );
+
+        let mut pinned = query_pinned_context(&mut target, "child-frame", &child_session);
+        let (world_tx, mut world_rx) = oneshot::channel();
+        send_internal(
+            &mut target,
+            InternalTargetMessage::GetIsolatedWorld {
+                frame_id: Some(FrameId::new("child-frame")),
+                expected_session_id: Some(child_session.clone()),
+                tx: world_tx,
+            },
+        );
+        let _ = poll_target(&mut target, Instant::now());
+        assert!(matches!(pinned.try_recv(), Ok(None)));
+        assert!(matches!(world_rx.try_recv(), Ok(None)));
+
+        target
+            .iframe_init_states
+            .insert(child_session.clone(), IframeInitState::Done);
+        let _ = poll_target(&mut target, Instant::now());
+        let context = block_on(pinned)
+            .expect("pinned query is answered")
+            .expect("frame is ready")
+            .expect("context exists");
+        assert_eq!(context.context_id, ExecutionContextId::new(4));
+        let slot = block_on(world_rx)
+            .expect("world query is answered")
+            .expect("frame is ready");
+        assert_eq!(slot.frame_id, FrameId::new("child-frame"));
+        assert_eq!(slot.session_id, child_session);
+    }
+
+    #[test]
+    fn frame_queries_fail_at_once_for_a_failed_child_session() {
+        let (mut target, _) = initialized_target();
+        let child_session = session("child");
+        install_child(&mut target, "child-frame", &child_session);
+        target
+            .iframe_init_states
+            .insert(child_session.clone(), IframeInitState::Failed);
+        let pinned = query_pinned_context(&mut target, "child-frame", &child_session);
+        assert!(matches!(
+            block_on(pinned).expect("pinned query is answered"),
+            Err(CdpError::FrameNotReady)
+        ));
+    }
+
+    #[test]
+    fn pending_pinned_context_query_fails_once_the_frame_moves() {
+        let (mut target, main_session) = initialized_target();
+        let child_session = session("child");
+        target.frame_manager.on_frame_attached_in_session(
+            FrameId::new("oop-frame"),
+            Some(FrameId::new("main-frame")),
+            main_session.clone(),
+        );
+        let mut pending = query_pinned_context(&mut target, "oop-frame", &main_session);
+        assert!(matches!(pending.try_recv(), Ok(None)));
+
+        target.on_event(attach_event_message(
+            &main_session,
+            attached_event("oop-frame", &child_session),
+        ));
+        let _ = poll_target(&mut target, Instant::now());
+        assert!(matches!(
+            block_on(pending).expect("pending query is answered"),
+            Err(CdpError::FrameNotReady)
         ));
     }
 

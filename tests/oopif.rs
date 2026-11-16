@@ -164,6 +164,10 @@ fn serve_connection(
     nested_served: &AtomicBool,
     requests: &Mutex<HashMap<(String, String), usize>>,
 ) {
+    // On Windows an accepted socket inherits the listener's non-blocking
+    // mode, which turns the first read into `WouldBlock` and aborts the
+    // connection; the read timeout below needs a blocking socket.
+    let _ = stream.set_nonblocking(false);
     let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
     let mut request = Vec::new();
     let mut buffer = [0_u8; 4096];
