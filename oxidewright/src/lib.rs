@@ -1,23 +1,84 @@
 //! # oxidewright
 //!
 //! A Rust port of the [Playwright](https://playwright.dev) API for Chromium,
-//! built on top of [`chromiumoxide`]. Class and method names follow
-//! Playwright's (in `snake_case`); options are builder methods chained before
-//! `.await`:
+//! built on top of [`chromiumoxide`], that leaves no protocol traces page
+//! scripts can observe (no `Runtime.enable`, isolated worlds created on
+//! demand). Class and method names follow Playwright's (in `snake_case`);
+//! options are builder methods chained before `.await`.
+//!
+//! ## Quick start
 //!
 //! ```no_run
-//! # async fn run() -> oxidewright::Result<()> {
-//! use oxidewright::LoadState;
+//! use oxidewright::{GetByRoleOptions, LoadState, chromium};
 //!
-//! let browser = oxidewright::chromium().launch().await?;
-//! let page = browser.new_context().await?.new_page().await?;
-//! page.goto("https://example.com").wait_until(LoadState::DomContentLoaded).await?;
-//! let title: String = page.evaluate("() => document.title").await?;
-//! let sum: i32 = page.evaluate("([a, b]) => a + b").arg((1, 2)).await?;
-//! # let _ = (title, sum);
-//! browser.close().await?;
-//! # Ok(()) }
+//! #[tokio::main]
+//! async fn main() -> oxidewright::Result<()> {
+//!     // const browser = await chromium.launch();
+//!     let browser = chromium().launch().headless(true).await?;
+//!     // const context = await browser.newContext({ locale: 'en-US' });
+//!     let context = browser.new_context().locale("en-US").await?;
+//!     let page = context.new_page().await?;
+//!
+//!     // await page.goto(url, { waitUntil: 'domcontentloaded' });
+//!     page.goto("https://example.com")
+//!         .wait_until(LoadState::DomContentLoaded)
+//!         .await?;
+//!
+//!     // await page.getByRole('link', { name: 'More information' }).click();
+//!     page.get_by_role_with("link", GetByRoleOptions::new().name("More information"))
+//!         .click()
+//!         .await?;
+//!
+//!     // const title = await page.evaluate(() => document.title);
+//!     let title: String = page.evaluate("() => document.title").await?;
+//!     // await page.evaluate(([a, b]) => a + b, [1, 2]);
+//!     let sum: i32 = page.evaluate("([a, b]) => a + b").arg((1, 2)).await?;
+//!     println!("{title} {sum}");
+//!
+//!     // await page.screenshot({ path: 'page.png', fullPage: true });
+//!     page.screenshot().path("page.png").full_page(true).await?;
+//!     browser.close().await?;
+//!     Ok(())
+//! }
 //! ```
+//!
+//! ## Where to start
+//!
+//! * [`chromium()`] → [`BrowserType::launch`] / [`BrowserType::connect_over_cdp`]
+//!   → [`Browser`] → [`Browser::new_context`] → [`BrowserContext::new_page`]
+//!   → [`Page`].
+//! * Find elements with [`Page::locator`] and the `get_by_*` methods
+//!   ([`Locator`]); actions auto-wait like Playwright's ([`actions`]).
+//! * Network: [`Page::route`] ([`Route`]), [`Request`], [`Response`],
+//!   [`Page::wait_for_response`], HAR ([`RecordHar`], [`Page::route_from_har`])
+//!   and [`APIRequestContext`].
+//! * Events: `page.on_*` closures, `wait_for_*` waiters and `expect_*`
+//!   helpers ([`WaitForEvent`], [`EventKind`]).
+//! * Errors: [`Error`], whose messages mirror Playwright's.
+//!
+//! The repository has runnable examples in `oxidewright/examples` and a
+//! Playwright → oxidewright guide in `oxidewright/docs/from-playwright.md`.
+//!
+//! ## Conventions
+//!
+//! | Playwright | oxidewright |
+//! |---|---|
+//! | `page.waitForLoadState()` | `page.wait_for_load_state().await?` |
+//! | `{ timeout: 5000, force: true }` | `.timeout(5_000).force(true)` before `.await` |
+//! | `page.evaluate(fn, arg)` | `page.evaluate::<T>(js).arg(arg).await?` (serde) |
+//! | `page.on('request', fn)` | `page.on_request(\|r\| ..)` |
+//! | `Promise.all([page.waitForEvent('popup'), click])` | `page.expect_popup(click).await?` |
+//! | `/text/i` | `oxidewright::regex("text", "i")` |
+//! | `keyboard.type`, `mouse.move`, `route.continue` | `r#type`/`type_text`, `r#move`/`move_to`, `continue_` |
+//!
+//! ## Stealth
+//!
+//! The `stealth` cargo feature (on by default) builds chromiumoxide without
+//! `Runtime.enable`, `Log.enable` and `Performance.enable`. oxidewright never
+//! needs them. Features that are observable by pages are opt-in:
+//! console/pageerror events (`.console_events(true)` on the context), JS/CSS
+//! coverage ([`coverage`]) and emulation overrides ([`emulation`]), which are
+//! only sent when the corresponding option is set.
 //!
 //! ## Design
 //!

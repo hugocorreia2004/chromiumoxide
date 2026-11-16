@@ -180,6 +180,18 @@ browser's fingerprint. `Page::enable_stealth_mode` and `Page::enable_stealth_mod
 not part of the feature: they inject scripts that override `navigator` properties, WebGL values
 and the user agent, which changes the fingerprint and can itself be detected.
 
+## oxidewright: the Playwright API in Rust
+
+This fork also hosts [`oxidewright`](oxidewright/README.md), a workspace crate that ports the
+[Playwright](https://playwright.dev) API (Chromium only) on top of chromiumoxide: locators,
+auto-waiting actions, network routing, events, emulation, storage state, HAR, tracing and more,
+with the same class and method names in `snake_case`. It enables the `stealth` feature above by
+default and never sends `Runtime.enable`. It is not on crates.io; depend on it from git:
+
+```toml
+oxidewright = { git = "https://github.com/hugocorreia2004/chromiumoxide" }
+```
+
 ## Compatibility and current limitations
 
 The frame/OOPIF API has two intentional source-compatibility exceptions:

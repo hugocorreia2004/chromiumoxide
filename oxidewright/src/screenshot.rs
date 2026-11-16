@@ -324,7 +324,7 @@ impl ScreenshotOptions {
 macro_rules! screenshot_builder_methods {
     () => {
         /// Also save the image to this file (its extension sets the
-        /// format unless [`Self::r#type`] is given).
+        /// format unless `.r#type(..)` is given).
         pub fn path(mut self, path: impl Into<PathBuf>) -> Self {
             self.options.path = Some(path.into());
             self
