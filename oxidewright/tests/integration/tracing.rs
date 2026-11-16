@@ -68,13 +68,16 @@ fn should_collect_screencast_frames_and_context_options() {
             .goto(format!("{}/grid.html", t.server.prefix))
             .await
             .unwrap();
-        for color in ["red", "green", "blue"] {
+        // Slow (macOS) CI runners can take a while to deliver the first frame.
+        for color in [
+            "red", "green", "blue", "yellow", "white", "black", "gray", "pink", "orange", "purple",
+        ] {
             t.page
                 .evaluate::<()>("c => document.body.style.backgroundColor = c")
                 .arg(color)
                 .await
                 .unwrap();
-            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
         }
         t.context.tracing().stop().path(&trace).await.unwrap();
 
