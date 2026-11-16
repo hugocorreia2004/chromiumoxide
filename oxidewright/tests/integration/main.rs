@@ -10,6 +10,7 @@ mod content;
 mod context_network;
 mod cookies;
 mod emulation;
+mod expect;
 mod fetch_util;
 mod forms;
 mod frames;

@@ -138,7 +138,61 @@ renderers and are not emulated separately yet. JS coverage enables the `Debugger
 `Profiler` domains and CDP sessions share the page session: both are visible to a page that
 looks for them.
 
-Planned: locators, actions and selectors; keyboard, mouse and touch.
+### Assertions (`expect`)
+
+`oxidewright::expect` ports Playwright Test's web-first assertions (without the test runner).
+They retry until they pass or the timeout expires (5 s by default, see
+`expect::set_default_timeout`), running the injected script's own `expect()` like Playwright does:
+
+```rust,ignore
+use oxidewright::expect::expect;
+use oxidewright::regex;
+
+expect(&page.get_by_role("button")).to_be_visible().await?;
+expect(&page.locator("#status")).not().to_have_text("Loading").timeout(1_000).await?;
+expect(&page.locator("li")).to_have_text(["one", "two"]).await?;   // one entry per element
+expect(&page.locator("h1")).to_contain_text(regex("welcome", "i")).await?;
+expect(&page).to_have_url("/done").await?;                          // resolved against base_url
+expect(&page).message("should be on the home page").to_have_title("Home").await?;
+expect(&page.request().get(url).await?).to_be_ok().await?;
+```
+
+* Locators: `to_be_attached`, `to_be_checked` (`.checked(..)`, `.indeterminate(..)`),
+  `to_be_disabled`, `to_be_editable`, `to_be_empty`, `to_be_enabled`, `to_be_focused`,
+  `to_be_hidden`, `to_be_in_viewport` (`.ratio(..)`), `to_be_visible`, `to_contain_text`,
+  `to_have_text` (`.use_inner_text(..)`, `.ignore_case(..)`; a string, a regex or a list),
+  `to_have_accessible_name` / `_description` / `_error_message`, `to_have_attribute(name, value)`,
+  `to_have_attribute_present(name)`, `to_have_class`, `to_contain_class`, `to_have_count`,
+  `to_have_css` (`.pseudo(..)`), `to_have_id`, `to_have_js_property`, `to_have_role`,
+  `to_have_value`, `to_have_values`, `to_match_aria_snapshot`, `to_have_screenshot`.
+* Pages: `to_have_title`, `to_have_url` (string or regex, `.ignore_case(..)`),
+  `to_have_url_matching(predicate)`, `to_match_aria_snapshot`, `to_have_screenshot`.
+* API responses (`page.request()` / `route.fetch()` responses): `to_be_ok`.
+* Failures are `Error::Expect(MatcherResult)` (name, pass, expected, actual, log, timeout, ARIA
+  snapshot) and the message mirrors Playwright's, diffs included:
+
+  ```text
+  expect(locator).toHaveText(expected) failed
+
+  Locator:  locator('#node')
+  Expected: "hey"
+  Received: "Text content"
+  Timeout:  1000ms
+
+  Call log:
+    - Expect "toHaveText" locator('#node') with timeout 1000ms
+    - waiting for locator('#node')
+    -   locator resolved to <div id="node">Text content</div>
+    -   unexpected value "Text content"
+  ```
+
+Differences with Playwright Test: no soft assertions, `expect.poll`, `expect.extend`, `toPass`,
+`AbortSignal` (drop the future instead) or `URLPattern`. ARIA snapshot templates are parsed with
+`yaml-rust2`, so YAML syntax errors are worded differently. `to_have_screenshot` compares
+with a PNG at an explicit path using Playwright's `pixelmatch` comparator (`threshold`,
+`max_diff_pixels`, `max_diff_pixel_ratio`); a missing file is written and the assertion fails,
+and `-actual.png` / `-diff.png` files are written next to it on mismatch. The `ssim-cie94`
+comparator, snapshot path templates and `--update-snapshots` modes are not ported.
 
 ### Tracing and video
 

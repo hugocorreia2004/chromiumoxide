@@ -292,6 +292,12 @@ impl Locator {
         &self.selector
     }
 
+    /// The error of an invalid locator (Playwright throws it when the
+    /// locator is built).
+    pub(crate) fn construction_error(&self) -> Option<&str> {
+        self.error.as_deref()
+    }
+
     /// The frame this locator belongs to.
     pub fn frame(&self) -> &Frame {
         &self.frame

@@ -1174,6 +1174,8 @@ struct RawResponse {
     status_text: String,
     headers: Vec<(String, String)>,
     body: Vec<u8>,
+    /// Playwright's fetch log (`→ GET url`, headers, `← 200 OK`, headers).
+    log: Vec<String>,
 }
 
 struct SendError {
@@ -1434,6 +1436,7 @@ impl Fetch {
             status: raw.status,
             status_text: raw.status_text,
             headers: raw.headers,
+            log: Arc::new(raw.log),
         })
     }
 }
@@ -1512,6 +1515,7 @@ async fn send_request(
     mut body: Option<Vec<u8>>,
     mut redirects_left: i64,
 ) -> std::result::Result<RawResponse, SendError> {
+    let mut log: Vec<String> = Vec::new();
     loop {
         // `_updateRequestCookieHeader`
         if find_header(&headers, "cookie").is_none() {
@@ -1531,6 +1535,10 @@ async fn send_request(
         let http_method = reqwest::Method::from_bytes(method.as_bytes())
             .map_err(|_| Error::invalid_argument(format!("Invalid method: {method}")))?;
         let mut request = client.request(http_method, url.clone());
+        log.push(format!("→ {method} {url}"));
+        for (name, value) in &headers {
+            log.push(format!("  {name}: {value}"));
+        }
         for (name, value) in &headers {
             request = request.header(name.as_str(), value.as_str());
         }
@@ -1558,6 +1566,10 @@ async fn send_request(
             .iter()
             .map(|(n, v)| (n.as_str().to_string(), header_text(v)))
             .collect();
+        log.push(format!("← {status} {status_text}"));
+        for (name, value) in &response_headers {
+            log.push(format!("  {name}: {value}"));
+        }
         let set_cookies: Vec<String> = response_headers
             .iter()
             .filter(|(n, _)| n.eq_ignore_ascii_case("set-cookie"))
@@ -1637,6 +1649,7 @@ async fn send_request(
             status_text,
             headers: response_headers,
             body: bytes,
+            log,
         });
     }
 }
@@ -1654,6 +1667,7 @@ pub struct APIResponse {
     status: u16,
     status_text: String,
     headers: Vec<(String, String)>,
+    log: Arc<Vec<String>>,
 }
 
 impl std::fmt::Debug for APIResponse {
@@ -1676,6 +1690,11 @@ impl std::fmt::Display for APIResponse {
 }
 
 impl APIResponse {
+    /// The request log (`apiResponse._fetchLog()`), used by `to_be_ok`.
+    pub(crate) fn fetch_log(&self) -> Vec<String> {
+        self.log.as_ref().clone()
+    }
+
     /// Final URL (after redirects).
     pub fn url(&self) -> &str {
         &self.url

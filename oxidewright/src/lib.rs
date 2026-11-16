@@ -56,6 +56,7 @@ pub mod emulation;
 mod error;
 mod events;
 pub mod execution_context;
+pub mod expect;
 mod ext;
 pub mod fetch;
 mod file_chooser;
