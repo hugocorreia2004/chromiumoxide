@@ -22,11 +22,20 @@ use tokio::sync::Notify;
 pub type Handler = Arc<dyn Fn(Request) -> BoxFuture<'static, Response> + Send + Sync>;
 
 async fn launch_browser() -> Browser {
-    let mut launch = oxidewright::chromium().launch();
-    if let Ok(path) = std::env::var("OXIDEWRIGHT_CHROME") {
-        launch = launch.executable_path(path);
+    // Retried once: on a cold CI runner the first Chrome processes can miss
+    // the launch timeout (the very first tests of a run failed this way).
+    let mut last_error = None;
+    for _ in 0..2 {
+        let mut launch = oxidewright::chromium().launch();
+        if let Ok(path) = std::env::var("OXIDEWRIGHT_CHROME") {
+            launch = launch.executable_path(path);
+        }
+        match launch.await {
+            Ok(browser) => return browser,
+            Err(e) => last_error = Some(e),
+        }
     }
-    launch.await.expect("failed to launch the browser")
+    panic!("failed to launch the browser: {:?}", last_error.unwrap())
 }
 
 /// Everything a test gets.
