@@ -90,7 +90,7 @@ pub(crate) enum ContextTarget {
 pub(crate) enum ContextSession {
     Frame(chromiumoxide::Frame),
     Worker {
-        page: Weak<crate::page::PageInner>,
+        browser: Weak<crate::browser::BrowserInner>,
         session: SessionId,
     },
 }
@@ -117,11 +117,8 @@ impl ContextSession {
     ) -> std::result::Result<CommandResponse<C::Response>, CdpError> {
         match self {
             ContextSession::Frame(frame) => frame.execute(cmd).await,
-            ContextSession::Worker { page, session } => {
-                let browser = page
-                    .upgrade()
-                    .and_then(|p| p.browser.upgrade())
-                    .ok_or(CdpError::TargetClosed)?;
+            ContextSession::Worker { browser, session } => {
+                let browser = browser.upgrade().ok_or(CdpError::TargetClosed)?;
                 let guard = browser.cdp_read().await;
                 let cdp = guard.as_ref().ok_or(CdpError::TargetClosed)?;
                 cdp.execute_with_session(cmd, Some(session.clone())).await

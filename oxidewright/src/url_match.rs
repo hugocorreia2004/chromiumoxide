@@ -50,6 +50,17 @@ impl From<&String> for UrlMatch {
     }
 }
 
+impl From<crate::locator_utils::JsRegex> for UrlMatch {
+    /// A JavaScript-style regular expression (`oxidewright::regex(..)`); an
+    /// invalid one matches nothing.
+    fn from(r: crate::locator_utils::JsRegex) -> Self {
+        match r.to_regex() {
+            Some(re) => UrlMatch::Regex(re),
+            None => UrlMatch::predicate(|_| false),
+        }
+    }
+}
+
 impl From<Regex> for UrlMatch {
     fn from(r: Regex) -> Self {
         UrlMatch::Regex(r)

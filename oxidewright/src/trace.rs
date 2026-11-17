@@ -138,7 +138,7 @@ pub(crate) async fn on_page_created(page: &Page) {
 /// `context.tracing()`. Cheap to clone.
 #[derive(Clone, Debug)]
 pub struct Tracing {
-    context: BrowserContext,
+    pub(crate) context: BrowserContext,
 }
 
 impl BrowserContext {

@@ -338,6 +338,12 @@ impl Frame {
             let generation = self.inner.context_gen.load(Ordering::SeqCst);
             match self.create_context(world).await {
                 Ok(ctx) => {
+                    if world == World::Main {
+                        // Exposed bindings, per context like Patchright
+                        // (`Runtime.addBinding` only reaches new documents
+                        // with `Runtime.enable`).
+                        crate::binding::on_main_context(self, &ctx).await;
+                    }
                     if generation == self.inner.context_gen.load(Ordering::SeqCst) {
                         self.inner.contexts.lock().unwrap()[index] = Some(ctx.clone());
                         return Ok(ctx);

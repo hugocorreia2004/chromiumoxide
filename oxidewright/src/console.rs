@@ -358,7 +358,7 @@ pub(crate) fn on_child_session_event(page: &PageInner, ev: &ChildSessionRuntimeE
                 std::sync::Weak::new(),
                 World::Main,
                 ContextSession::Worker {
-                    page: page.self_weak.clone(),
+                    browser: page.browser.clone(),
                     session: worker.session_id().clone(),
                 },
                 ContextTarget::Id(event.execution_context_id),

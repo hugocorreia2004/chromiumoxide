@@ -340,6 +340,27 @@ impl<const N: usize> From<[&str; N]> for InputFiles {
         Vec::from(v).into()
     }
 }
+impl From<Vec<String>> for InputFiles {
+    fn from(v: Vec<String>) -> Self {
+        if v.is_empty() {
+            return InputFiles::none();
+        }
+        InputFiles::Paths(v.into_iter().map(PathBuf::from).collect())
+    }
+}
+impl<const N: usize> From<[PathBuf; N]> for InputFiles {
+    fn from(v: [PathBuf; N]) -> Self {
+        if N == 0 {
+            return InputFiles::none();
+        }
+        InputFiles::Paths(v.into())
+    }
+}
+impl<const N: usize> From<[FilePayload; N]> for InputFiles {
+    fn from(v: [FilePayload; N]) -> Self {
+        InputFiles::Payloads(v.into())
+    }
+}
 impl From<FilePayload> for InputFiles {
     fn from(v: FilePayload) -> Self {
         InputFiles::Payloads(vec![v])

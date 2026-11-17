@@ -28,6 +28,18 @@ pub(crate) struct ContextExt {
     pub(crate) offline: AtomicBool,
     pub(crate) http_credentials: Mutex<Option<HttpCredentials>>,
     pub(crate) har_recorders: Mutex<Vec<Arc<HarRecorder>>>,
+    /// `expose_function` / `expose_binding` of the context.
+    pub(crate) bindings: crate::binding::Bindings,
+    /// `route_web_socket` handlers of the context.
+    pub(crate) ws_routes: crate::web_socket_route::WsRoutes,
+    /// Routed WebSockets and their binding.
+    pub(crate) ws_state: crate::web_socket_route::WsContextState,
+    /// `context.credentials`.
+    pub(crate) credentials: crate::credentials::CredentialsState,
+    /// The recorder of `tracing.start_har`.
+    pub(crate) tracing_har: Mutex<Option<Arc<HarRecorder>>>,
+    /// `context.service_workers()`.
+    pub(crate) service_workers: crate::service_worker::ServiceWorkers,
 }
 
 impl ContextExt {
@@ -39,6 +51,12 @@ impl ContextExt {
             offline: AtomicBool::new(options.offline),
             http_credentials: Mutex::new(options.http_credentials.clone()),
             har_recorders: Mutex::new(Vec::new()),
+            bindings: Default::default(),
+            ws_routes: Default::default(),
+            ws_state: Default::default(),
+            credentials: Default::default(),
+            tracing_har: Mutex::new(None),
+            service_workers: Default::default(),
         }
     }
 

@@ -29,3 +29,10 @@ Microsoft Corporation.
 src/devices.json is Playwright's device descriptor list
 (packages/isomorphic/deviceDescriptorsSource.json of Playwright 1.65.1),
 Copyright (c) Microsoft Corporation, Apache License, Version 2.0.
+
+src/js/page_binding_serializers.js is the `source()` function of
+oldUtilityScriptSerializers.ts as built in patchright-core 1.64.3
+(lib/coreBundle.js); src/binding.rs embeds `addPageBinding` and
+`deliverBindingResult` of Patchright's server/pageBinding.ts.
+Copyright (c) Microsoft Corporation and the Patchright contributors,
+Apache License, Version 2.0.

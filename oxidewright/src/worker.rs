@@ -39,6 +39,9 @@ struct WorkerInner {
     url: String,
     session: SessionId,
     page: Weak<PageInner>,
+    /// Commands go through the browser connection (service workers have
+    /// no page).
+    browser: Weak<crate::browser::BrowserInner>,
     closed: AtomicBool,
     attached_at: std::time::Instant,
     close_handlers: Mutex<Vec<Arc<dyn Fn() + Send + Sync>>>,
@@ -154,13 +157,17 @@ impl Worker {
                 if self.is_closed() {
                     return Err(Error::target_closed());
                 }
-                let page = self.inner.page.upgrade().ok_or_else(Error::target_closed)?;
-                let result = send(
-                    &page,
-                    Some(self.inner.session.clone()),
-                    EvaluateParams::new("globalThis"),
-                )
-                .await?;
+                let browser = self
+                    .inner
+                    .browser
+                    .upgrade()
+                    .ok_or_else(Error::target_closed)?;
+                let result = browser
+                    .execute_with_session(
+                        EvaluateParams::new("globalThis"),
+                        Some(self.inner.session.clone()),
+                    )
+                    .await?;
                 let object_id = result
                     .result
                     .object_id
@@ -169,7 +176,7 @@ impl Worker {
                     Weak::new(),
                     World::Main,
                     ContextSession::Worker {
-                        page: self.inner.page.clone(),
+                        browser: self.inner.browser.clone(),
                         session: self.inner.session.clone(),
                     },
                     ContextTarget::Object(object_id),
@@ -179,7 +186,29 @@ impl Worker {
             .cloned()
     }
 
-    fn mark_closed(&self) {
+    /// A service worker attached by the browser (see `service_worker.rs`).
+    pub(crate) fn new_service_worker(
+        url: String,
+        session: SessionId,
+        browser: Weak<crate::browser::BrowserInner>,
+    ) -> Worker {
+        Worker {
+            inner: Arc::new(WorkerInner {
+                url,
+                session,
+                page: Weak::new(),
+                browser,
+                closed: AtomicBool::new(false),
+                attached_at: std::time::Instant::now(),
+                close_handlers: Mutex::new(Vec::new()),
+                close_tx: tokio::sync::watch::channel(false).0,
+                console_handlers: Mutex::new(Vec::new()),
+                context: tokio::sync::OnceCell::new(),
+            }),
+        }
+    }
+
+    pub(crate) fn mark_closed(&self) {
         if self.inner.closed.swap(true, Ordering::SeqCst) {
             return;
         }
@@ -293,6 +322,7 @@ pub(crate) fn on_attached(page: &PageInner, ev: &EventAttachedToTarget) {
             url: ev.target_info.url.clone(),
             session: ev.session_id.clone(),
             page: page.self_weak.clone(),
+            browser: page.browser.clone(),
             closed: AtomicBool::new(false),
             attached_at: std::time::Instant::now(),
             close_handlers: Mutex::new(Vec::new()),

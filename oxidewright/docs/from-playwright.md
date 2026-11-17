@@ -237,7 +237,7 @@ install locations like Playwright's registry), `args`, `ignore_default_args(true
 
 | Playwright | oxidewright | Notes |
 |---|---|---|
-| `context.exposeBinding()` | missing | not implemented: `Runtime.addBinding` is visible to pages |
+| `context.exposeBinding()` | `context.expose_binding(name, \|source, args\| async move { .. }).await` | Patchright's way: only `Runtime.addBinding(name)`, no `Runtime.enable`; returns `ExposedBinding` (`dispose()`) |
 | `context.addInitScript()` | `context.add_init_script(script).await` |  |
 | `context.removeAllListeners()` | `context.remove_all_listeners(None)` | or `Some(EventKind::Page)` |
 | `context.on()` | `context.on(EventKind::Page, \|event\| ..)` | or typed: `context.on_page(\|p\| ..)` |
@@ -250,7 +250,7 @@ install locations like Playwright's registry), `args`, `ignore_default_args(true
 | `context.clearPermissions()` | `context.clear_permissions().await` |  |
 | `context.close()` | `context.close().await` |  |
 | `context.cookies()` | `context.cookies().urls(urls).await` |  |
-| `context.exposeFunction()` | missing | not implemented: `Runtime.addBinding` is visible to pages |
+| `context.exposeFunction()` | `context.expose_function(name, \|args\| async move { Ok::<_, BindingError>(..) }).await` | args are `Vec<JsValue>`; any `Serialize` result (handles included) |
 | `context.grantPermissions()` | `context.grant_permissions(permissions).await` |  |
 | `context.isClosed()` | `context.is_closed()` |  |
 | `context.newCDPSession()` | `context.new_cdp_session(&page).await` | or `&frame` |
@@ -258,8 +258,8 @@ install locations like Playwright's registry), `args`, `ignore_default_args(true
 | `context.pages()` | `context.pages()` |  |
 | `context.route()` | `context.route(url, \|route\| async move { .. }).await` |  |
 | `context.routeFromHAR()` | `context.route_from_har(path).await` |  |
-| `context.routeWebSocket()` | missing | not implemented: Playwright injects a script in the page |
-| `context.serviceWorkers()` | missing | service workers are not supported |
+| `context.routeWebSocket()` | `context.route_web_socket(url, \|ws: WebSocketRoute\| async move { .. }).await` | same main-world mock and globals as Patchright, only while routing |
+| `context.serviceWorkers()` | `context.service_workers()` | `Worker`s; evaluated with `Runtime.evaluate` only |
 | `context.setDefaultNavigationTimeout()` | `context.set_default_navigation_timeout(timeout_ms)` |  |
 | `context.setDefaultTimeout()` | `context.set_default_timeout(timeout_ms)` |  |
 | `context.setExtraHTTPHeaders()` | `context.set_extra_http_headers(headers).await` |  |
@@ -274,8 +274,9 @@ install locations like Playwright's registry), `args`, `ignore_default_args(true
 | `context.tracing` | `context.tracing()` |  |
 | `context.clock` | `context.clock()` |  |
 | `context.request` | `context.request()` |  |
+| `context.credentials` | `context.credentials()` | Chromium's virtual authenticator (CDP `WebAuthn`), nothing injected in the page |
 
-Typed event handlers: `on_page`, `on_console`, `on_dialog`, `on_dialog_closed`, `on_web_error`, `on_request`, `on_request_failed`, `on_request_finished`, `on_response`, `on_download`, `on_frame_attached`, `on_frame_detached`, `on_frame_navigated`, `on_page_close`, `on_page_load`, `on_close`.
+Typed event handlers: `on_page`, `on_console`, `on_dialog`, `on_dialog_closed`, `on_web_error`, `on_request`, `on_request_failed`, `on_request_finished`, `on_response`, `on_download`, `on_frame_attached`, `on_frame_detached`, `on_frame_navigated`, `on_page_close`, `on_page_load`, `on_close`, `on_service_worker` (the `serviceworker` event; `wait_for_service_worker()` waits for one).
 
 Also: `wait_for_page`, `wait_for_request`, `wait_for_response`, `wait_for_console_message`, `wait_for_dialog`, `wait_for_dialog_closed`, `wait_for_close`, `expect_event`, `expect_page`, `expect_console_message`, `close_reason`.
 
@@ -292,7 +293,7 @@ Also: `wait_for_page`, `wait_for_request`, `wait_for_response`, `wait_for_consol
 | `page.addInitScript()` | `page.add_init_script(script).await` | `add_init_script_path(path)` for `{ path }`; returns an `InitScript` with `dispose()` |
 | `page.waitForFunction()` | `page.wait_for_function(expression).arg(a).polling(100).await` | `.polling("raf")` (default) or ms; isolated world by default with `stealth`, `.isolated_context(false)` for page globals |
 | `page.waitForSelector()` | `page.wait_for_selector(selector).await` |  |
-| `page.exposeBinding()` | missing | not implemented: `Runtime.addBinding` is visible to pages |
+| `page.exposeBinding()` | `page.expose_binding(name, \|source, args\| async move { .. }).await` | `source.page`, `source.frame`, `source.context` |
 | `page.removeAllListeners()` | `page.remove_all_listeners(Some(EventKind::Request))` | `None` removes all |
 | `page.on()` | `page.on(EventKind::Request, \|event\| ..)` | or typed: `page.on_request(\|r\| ..)`; returns a `ListenerId` |
 | `page.once()` | `page.once(EventKind::Popup, \|event\| ..)` |  |
@@ -316,7 +317,7 @@ Also: `wait_for_page`, `wait_for_request`, `wait_for_response`, `wait_for_consol
 | `page.dispatchEvent()` | `page.dispatch_event(selector, type_).await` |  |
 | `page.dragAndDrop()` | `page.drag_and_drop(source, target).scroll(b).await` | `scroll: "none"` is `.scroll(false)` |
 | `page.emulateMedia()` | `page.emulate_media().await` |  |
-| `page.exposeFunction()` | missing | not implemented: `Runtime.addBinding` is visible to pages |
+| `page.exposeFunction()` | `page.expose_function(name, \|args\| async move { .. }).await` | throw in the page with `Err(BindingError::new(msg))` or `BindingError::value(v)` |
 | `page.fill()` | `page.fill(selector, value).await` |  |
 | `page.focus()` | `page.focus(selector).await` |  |
 | `page.frame()` | `page.frame(name)` |  |
@@ -360,7 +361,7 @@ Also: `wait_for_page`, `wait_for_request`, `wait_for_response`, `wait_for_consol
 | `page.requests()` | `page.requests().await` | last 100 requests |
 | `page.route()` | `page.route(url, \|route\| async move { .. }).times(n).await` | returns a `RouteId` for `unroute(url).handler(id)` |
 | `page.routeFromHAR()` | `page.route_from_har(path).await` |  |
-| `page.routeWebSocket()` | missing | not implemented: Playwright injects a script in the page |
+| `page.routeWebSocket()` | `page.route_web_socket(url, \|ws: WebSocketRoute\| async move { .. }).await` | page handlers win over context ones |
 | `page.screenshot()` | `page.screenshot().path(path).full_page(true).await` | returns the bytes |
 | `page.selectOption()` | `page.select_option(selector, values).await` |  |
 | `page.setChecked()` | `page.set_checked(selector, checked).await` |  |
@@ -676,7 +677,7 @@ Also: `move_to`.
 | `request.redirectedTo()` | `request.redirected_to()` |  |
 | `request.resourceType()` | `request.resource_type()` |  |
 | `request.response()` | `request.response().await` |  |
-| `request.serviceWorker()` | missing | service workers are not supported |
+| `request.serviceWorker()` | missing | network events of service worker sessions are not tracked |
 | `request.sizes()` | `request.sizes().await` |  |
 | `request.timing()` | `request.timing()` |  |
 | `request.url()` | `request.url()` |  |
@@ -716,7 +717,7 @@ Also: `from_cache`, `sizes`.
 | `route.abort()` | `route.abort().error_code("failed").await` |  |
 | `route.continue()` | `route.continue_().headers(headers).await` |  |
 | `route.fallback()` | `route.fallback().url(url).await` |  |
-| `route.fetch()` | `route.fetch().await` | goes through the browser; returns `oxidewright::APIResponse` |
+| `route.fetch()` | `route.fetch().timeout(ms).max_redirects(n).max_retries(n).await` | first hop goes through the browser; redirects (default 20) are followed with the context's `APIRequestContext`; `max_retries` applies to those |
 | `route.fulfill()` | `route.fulfill().status(200).json(&value).await` | also `body`, `path`, `headers`, `content_type`, `response` |
 | `route.request()` | `route.request()` |  |
 
@@ -753,12 +754,12 @@ Also: `from_cache`, `sizes`.
 | `response.headers()` | `response.headers()` |  |
 | `response.headersArray()` | `response.headers_array()` |  |
 | `response.ok()` | `response.ok()` |  |
-| `response.securityDetails()` | missing | not implemented yet |
-| `response.serverAddr()` | missing | not implemented yet |
+| `response.securityDetails()` | `response.security_details().await` | subject, issuer and validity; `protocol` is `None` (not reported by the HTTP client) |
+| `response.serverAddr()` | `response.server_addr().await` |  |
 | `response.status()` | `response.status()` |  |
 | `response.statusText()` | `response.status_text()` |  |
 | `response.text()` | `response.text().await` |  |
-| `response.timing()` | missing | not implemented yet |
+| `response.timing()` | `response.timing()` | DNS/connect/TLS phases are -1 (not reported by the HTTP client) |
 | `response.url()` | `response.url()` |  |
 
 Also: `header_value`, `header_values`.
@@ -795,7 +796,7 @@ Also: `header_value`, `header_values`.
 | `chooser.element()` | `chooser.element()` |  |
 | `chooser.isMultiple()` | `chooser.is_multiple()` |  |
 | `chooser.page()` | `chooser.page()` |  |
-| `chooser.setFiles()` | `chooser.set_files(files).await` |  |
+| `chooser.setFiles()` | `chooser.set_files(files).timeout(ms).no_wait_after(b).await` | paths or `FilePayload`s |
 
 ### ConsoleMessage
 
@@ -846,10 +847,10 @@ Also: `page`, `is_closed`.
 | `tracing.groupEnd()` | `tracing.group_end().await` |  |
 | `tracing.start()` | `tracing.start().screenshots(true).await` |  |
 | `tracing.startChunk()` | `tracing.start_chunk().await` |  |
-| `tracing.startHar()` | missing | not implemented yet |
+| `tracing.startHar()` | `tracing.start_har(path).mode(HarMode::Minimal).url_filter(glob).await` | `content`, `mode`, `url_filter`; no `resourcesDir`, no `.zip` |
 | `tracing.stop()` | `tracing.stop().path(path).await` |  |
 | `tracing.stopChunk()` | `tracing.stop_chunk().path(path).await` |  |
-| `tracing.stopHar()` | missing | not implemented yet |
+| `tracing.stopHar()` | `tracing.stop_har().await` |  |
 
 ### Clock
 
@@ -870,8 +871,10 @@ Also: `page`, `is_closed`.
 | `session.on()` | `session.event_listener::<EventType>().await` | a typed stream of chromiumoxide CDP events |
 | `session.removeListener()` | missing | drop the stream |
 | `session.once()` | `session.event_listener::<EventType>().await` | take one item from the stream |
-| `session.send()` | `session.send("Method.name", json!({..})).await` | returns `serde_json::Value` |
+| `session.send()` | `session.send("Method.name", json!({..})).timeout(ms).await` | returns `serde_json::Value` |
 | `session.detach()` | `session.detach().await` |  |
+| `session.on('close')` | `session.on_close(\|\| ..)` / `session.wait_for_close().await` | detach, page close or frame detach |
+| `session.on('event')` | missing | chromiumoxide only dispatches typed per-method events |
 
 ### Video
 
@@ -891,6 +894,27 @@ Also: `page`, `is_closed`.
 
 `route.fetch()` returns the root `oxidewright::APIResponse`, with `url`, `status`, `status_text`,
 `ok`, `headers`, `headers_array`, `body`, `text` and `json`.
+
+### WebSocketRoute
+
+| Playwright | oxidewright | Notes |
+|---|---|---|
+| `ws.close()` | `ws.close().await` / `ws.close_with(Some(code), Some(reason)).await` |  |
+| `ws.connectToServer()` | `ws.connect_to_server()?` | returns `WebSocketRouteServer` (`send`, `on_message`, `on_close`, `close`, `url`, `protocols`) |
+| `ws.onClose()` | `ws.on_close(\|code, reason\| ..)` |  |
+| `ws.onMessage()` | `ws.on_message(\|message\| ..)` | `WebSocketPayload::Text`/`Binary` |
+| `ws.protocols()` | `ws.protocols()` |  |
+| `ws.send()` | `ws.send(message)` |  |
+| `ws.url()` | `ws.url()` |  |
+
+### Credentials
+
+| Playwright | oxidewright | Notes |
+|---|---|---|
+| `credentials.create()` | `credentials.create(rp_id).sign_count(n).await` | or `.from(&credential)` to import one |
+| `credentials.delete()` | `credentials.delete(id).await` |  |
+| `credentials.get()` | `credentials.get().rp_id(rp).id(id).await` | includes credentials registered by pages and current sign counters |
+| `credentials.install()` | `credentials.install().await` | one CDP virtual authenticator per page; `navigator.credentials` stays native |
 
 ### Not ported as classes
 

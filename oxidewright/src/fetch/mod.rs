@@ -487,6 +487,7 @@ impl APIRequestContext {
         }
         let mut builder = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
+            .tls_info(true)
             .tls_danger_accept_invalid_certs(ignore_https_errors);
         builder = match proxy {
             Some(proxy) => {
@@ -1186,6 +1187,9 @@ struct RawResponse {
     body: Vec<u8>,
     /// Playwright's fetch log (`→ GET url`, headers, `← 200 OK`, headers).
     log: Vec<String>,
+    server_addr: Option<crate::network::RemoteAddr>,
+    security_details: Option<crate::network::SecurityDetails>,
+    timing: crate::network::ResourceTiming,
 }
 
 struct SendError {
@@ -1447,6 +1451,9 @@ impl Fetch {
             status_text: raw.status_text,
             headers: raw.headers,
             log: Arc::new(raw.log),
+            server_addr: raw.server_addr,
+            security_details: raw.security_details,
+            timing: raw.timing,
         })
     }
 }
@@ -1555,6 +1562,11 @@ async fn send_request(
         if let Some(body) = &body {
             request = request.body(body.clone());
         }
+        let start_time = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs_f64() * 1000.0)
+            .unwrap_or_default();
+        let started = std::time::Instant::now();
         let response = match request.send().await {
             Ok(r) => r,
             Err(err) => {
@@ -1565,6 +1577,16 @@ async fn send_request(
                 });
             }
         };
+        let response_start = started.elapsed().as_secs_f64() * 1000.0;
+        let server_addr = response.remote_addr().map(|a| crate::network::RemoteAddr {
+            ip_address: a.ip().to_string(),
+            port: a.port(),
+        });
+        let security_details = response
+            .extensions()
+            .get::<reqwest::tls::TlsInfo>()
+            .and_then(|info| info.peer_certificate())
+            .map(certificate_details);
         let status = response.status().as_u16();
         let status_text = response
             .status()
@@ -1653,6 +1675,18 @@ async fn send_request(
                 });
             }
         };
+        // reqwest does not report the DNS/connect/TLS phases: they stay -1.
+        let timing = crate::network::ResourceTiming {
+            start_time,
+            domain_lookup_start: -1.0,
+            domain_lookup_end: -1.0,
+            connect_start: -1.0,
+            secure_connection_start: -1.0,
+            connect_end: -1.0,
+            request_start: 0.0,
+            response_start,
+            response_end: started.elapsed().as_secs_f64() * 1000.0,
+        };
         return Ok(RawResponse {
             url: url.to_string(),
             status,
@@ -1660,6 +1694,9 @@ async fn send_request(
             headers: response_headers,
             body: bytes,
             log,
+            server_addr,
+            security_details,
+            timing,
         });
     }
 }
@@ -1678,6 +1715,9 @@ pub struct APIResponse {
     status_text: String,
     headers: Vec<(String, String)>,
     log: Arc<Vec<String>>,
+    server_addr: Option<crate::network::RemoteAddr>,
+    security_details: Option<crate::network::SecurityDetails>,
+    timing: crate::network::ResourceTiming,
 }
 
 impl std::fmt::Debug for APIResponse {
@@ -1703,6 +1743,25 @@ impl APIResponse {
     /// The request log (`apiResponse._fetchLog()`), used by `to_be_ok`.
     pub(crate) fn fetch_log(&self) -> Vec<String> {
         self.log.as_ref().clone()
+    }
+
+    /// IP address and port of the server that answered.
+    pub async fn server_addr(&self) -> Option<crate::network::RemoteAddr> {
+        self.server_addr.clone()
+    }
+
+    /// TLS details of an HTTPS response (subject, issuer and validity of
+    /// the server certificate; `protocol` is not reported by the HTTP
+    /// client and stays `None`). `None` for plain HTTP.
+    pub async fn security_details(&self) -> Option<crate::network::SecurityDetails> {
+        self.security_details.clone()
+    }
+
+    /// Timing of the request (milliseconds relative to `start_time`). The
+    /// HTTP client does not report DNS, connect and TLS phases: those are
+    /// -1, like unknown values in Playwright.
+    pub fn timing(&self) -> crate::network::ResourceTiming {
+        self.timing
     }
 
     /// Final URL (after redirects).
@@ -1855,6 +1914,119 @@ mod tests {
         assert_eq!(
             basic_auth(&HttpCredentials::new("user", "pass")),
             "Basic dXNlcjpwYXNz"
+        );
+    }
+}
+
+// ----------------------------------------------------------------------
+// Certificate details (minimal DER reader)
+// ----------------------------------------------------------------------
+
+/// One DER TLV: (tag, content, rest).
+fn der_next(data: &[u8]) -> Option<(u8, &[u8], &[u8])> {
+    let tag = *data.first()?;
+    let first = *data.get(1)? as usize;
+    let (len, header) = if first < 0x80 {
+        (first, 2)
+    } else {
+        let n = first & 0x7f;
+        if n == 0 || n > 4 {
+            return None;
+        }
+        let mut len = 0usize;
+        for i in 0..n {
+            len = (len << 8) | *data.get(2 + i)? as usize;
+        }
+        (len, 2 + n)
+    };
+    let content = data.get(header..header + len)?;
+    Some((tag, content, &data[header + len..]))
+}
+
+/// The common name (or the last attribute) of an X.509 `Name`.
+fn der_common_name(name: &[u8]) -> Option<String> {
+    const CN: &[u8] = &[0x55, 0x04, 0x03];
+    let mut rest = name;
+    let mut fallback = None;
+    while let Some((_, set, next)) = der_next(rest) {
+        rest = next;
+        let Some((_, attr, _)) = der_next(set) else {
+            continue;
+        };
+        let Some((_, oid, value)) = der_next(attr) else {
+            continue;
+        };
+        let Some((_, text, _)) = der_next(value) else {
+            continue;
+        };
+        let text = String::from_utf8_lossy(text).into_owned();
+        if oid == CN {
+            return Some(text);
+        }
+        fallback = Some(text);
+    }
+    fallback
+}
+
+/// UTCTime / GeneralizedTime → Unix seconds.
+fn der_time(tag: u8, content: &[u8]) -> Option<f64> {
+    let s = std::str::from_utf8(content).ok()?;
+    let s = s.strip_suffix('Z')?;
+    let (year, rest) = if tag == 0x17 {
+        let y: i64 = s.get(0..2)?.parse().ok()?;
+        (if y >= 50 { 1900 + y } else { 2000 + y }, s.get(2..)?)
+    } else {
+        (s.get(0..4)?.parse().ok()?, s.get(4..)?)
+    };
+    let num = |r: std::ops::Range<usize>| -> Option<i64> { rest.get(r)?.parse().ok() };
+    let (month, day, hour, minute) = (num(0..2)?, num(2..4)?, num(4..6)?, num(6..8)?);
+    let second = num(8..10).unwrap_or(0);
+    // Days from civil (Howard Hinnant's algorithm).
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let mp = (month + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146097 + doe - 719468;
+    Some((days * 86400 + hour * 3600 + minute * 60 + second) as f64)
+}
+
+fn certificate_details(der: &[u8]) -> crate::network::SecurityDetails {
+    let mut details = crate::network::SecurityDetails::default();
+    let mut parse = || -> Option<()> {
+        let (_, certificate, _) = der_next(der)?;
+        let (_, tbs, _) = der_next(certificate)?;
+        let mut rest = tbs;
+        let (tag, _, next) = der_next(rest)?;
+        if tag == 0xa0 {
+            rest = next; // version
+        }
+        let (_, _, next) = der_next(rest)?; // serial
+        let (_, _, next) = der_next(next)?; // signature algorithm
+        let (_, issuer, next) = der_next(next)?;
+        let (_, validity, next) = der_next(next)?;
+        let (_, subject, _) = der_next(next)?;
+        details.issuer = der_common_name(issuer);
+        details.subject_name = der_common_name(subject);
+        let (t1, from, after) = der_next(validity)?;
+        let (t2, to, _) = der_next(after)?;
+        details.valid_from = der_time(t1, from);
+        details.valid_to = der_time(t2, to);
+        Some(())
+    };
+    let _ = parse();
+    details
+}
+
+#[cfg(test)]
+mod certificate_tests {
+    #[test]
+    fn parses_der_times() {
+        assert_eq!(super::der_time(0x17, b"230811000000Z"), Some(1691712000.0));
+        assert_eq!(
+            super::der_time(0x18, b"20330807000000Z"),
+            Some(2006985600.0)
         );
     }
 }
