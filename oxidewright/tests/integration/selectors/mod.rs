@@ -7,6 +7,7 @@ mod drag;
 mod frame;
 mod get_by;
 mod misc;
+mod register;
 mod retarget;
 mod role;
 mod text;

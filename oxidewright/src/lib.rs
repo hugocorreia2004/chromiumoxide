@@ -233,7 +233,7 @@ pub use screenshot::{
     Animations, Caret, ElementScreenshot, Mask, PageScreenshot, Rect, ScreenshotScale,
     ScreenshotType,
 };
-pub use selectors::{Selectors, selectors};
+pub use selectors::{RegisterSelector, Selectors, selectors};
 pub use service_worker::WaitForServiceWorker;
 pub use storage_state::{
     NameValue, OriginState, StorageState, StorageStateBuilder, StorageStateSource,

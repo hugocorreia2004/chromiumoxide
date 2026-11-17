@@ -313,7 +313,7 @@ impl ExecutionContext {
                     "browserName": "chromium",
                     "shouldPrependErrorPrefix": false,
                     "isUtilityWorld": self.inner.world == World::Utility,
-                    "customEngines": [],
+                    "customEngines": crate::selectors::custom_engines_json(),
                 });
                 let source = js::instantiate_source(
                     sources::INJECTED_SCRIPT,

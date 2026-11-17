@@ -888,7 +888,7 @@ Also: `page`, `is_closed`.
 
 | Playwright | oxidewright | Notes |
 |---|---|---|
-| `selectors.register()` | missing | not implemented yet |
+| `selectors.register(name, script, { contentScript })` | `selectors().register(name, script).content_script(true)`; `register_path(name, path)` | process-wide; engines without `content_script` run in the page's main world (visible to the page) |
 | `selectors.setTestIdAttribute()` | `selectors().set_test_id_attribute(attribute_name)` |  |
 
 

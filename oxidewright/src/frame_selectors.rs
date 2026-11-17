@@ -442,7 +442,11 @@ async fn query_frames(
     strict: bool,
     parent_visible: bool,
 ) -> Result<Vec<(Frame, bool)>> {
-    let ctx = frame.utility_context().await?;
+    let ctx = if crate::selectors::needs_main_world(selector_string) {
+        frame.main_context().await?
+    } else {
+        frame.utility_context().await?
+    };
     let array = handle_of(
         call_injected(
             &ctx,
@@ -580,7 +584,7 @@ pub(crate) async fn call_on_selector(
         frame_visible,
     } in resolved
     {
-        let world = if options.main_world {
+        let world = if options.main_world || crate::selectors::needs_main_world(&target.selector) {
             World::Main
         } else {
             World::Utility
