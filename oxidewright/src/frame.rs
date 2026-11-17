@@ -219,6 +219,12 @@ impl Frame {
         self.inner.detached.load(Ordering::SeqCst)
     }
 
+    /// The detached flag without syncing events first: safe to call while
+    /// holding page locks (`is_detached()` is not).
+    pub(crate) fn detached_flag(&self) -> bool {
+        self.inner.detached.load(Ordering::SeqCst)
+    }
+
     /// Whether the given lifecycle state was reached for the current document.
     pub fn has_load_state(&self, state: LoadState) -> bool {
         self.sync();
@@ -714,6 +720,11 @@ impl Frame {
             return Err(Error::navigation("Download is starting"));
         }
         if let Some(error_text) = result.error_text.filter(|e| !e.is_empty()) {
+            // Closing the page aborts its navigation, and Chrome may answer
+            // `Page.navigate` with ERR_ABORTED before the close is seen.
+            if Self::closed_soon(&page).await {
+                return Err(Error::target_closed());
+            }
             return Err(Error::navigation(format!("{error_text} at {url}")));
         }
         let new_document_id = result.loader_id.map(|l| l.as_ref().to_string());
@@ -778,6 +789,17 @@ impl Frame {
         self.wait_for_lifecycle(&page, &mut rx, wait_until, None)
             .await?;
         Ok(event.response())
+    }
+
+    /// Whether the page gets closed within a short grace period.
+    async fn closed_soon(page: &PageInner) -> bool {
+        for _ in 0..10 {
+            if page.is_closed() {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        page.is_closed()
     }
 
     /// Whether the frame gets detached within a short grace period (a failed
