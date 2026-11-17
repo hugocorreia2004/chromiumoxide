@@ -219,6 +219,12 @@ impl Frame {
         self.inner.detached.load(Ordering::SeqCst)
     }
 
+    /// The detached flag without syncing events first: safe to call while
+    /// holding page locks (`is_detached()` is not).
+    pub(crate) fn detached_flag(&self) -> bool {
+        self.inner.detached.load(Ordering::SeqCst)
+    }
+
     /// Whether the given lifecycle state was reached for the current document.
     pub fn has_load_state(&self, state: LoadState) -> bool {
         self.sync();
@@ -649,7 +655,7 @@ impl Frame {
 
     /// A navigation failing because the page is closing reports the closure
     /// (Playwright races navigations against the page's open scope).
-    async fn closed_or(&self, err: Error) -> Error {
+    pub(crate) async fn closed_or(&self, err: Error) -> Error {
         if err.is_target_closed() {
             return err;
         }
@@ -677,6 +683,8 @@ impl Frame {
         progress.log(format!(
             "navigating to \"{url}\", waiting until \"{wait_until}\""
         ));
+        // `subscribe()` applies the events already received, so a lagging
+        // pump cannot replay an earlier commit as if it interrupted ours.
         let mut rx = page.subscribe();
         let frame_id = self.inner.id.clone();
         let mut detach_rx = page.subscribe();
@@ -709,11 +717,38 @@ impl Frame {
             return Err(Error::navigation("Download is starting"));
         }
         if let Some(error_text) = result.error_text.filter(|e| !e.is_empty()) {
-            return Err(Error::navigation(format!("{error_text} at {url}")));
+            // Closing the page aborts its navigation, and Chrome may answer
+            // `Page.navigate` with ERR_ABORTED before the close is seen.
+            return Err(self
+                .closed_or(Error::navigation(format!("{error_text} at {url}")))
+                .await);
         }
         let new_document_id = result.loader_id.map(|l| l.as_ref().to_string());
+        // Commits received before the `Page.navigate` response belong to
+        // earlier navigations (the one this replaces, whose event may still
+        // have been in flight when we subscribed). Playwright only listens
+        // after the response, so drop those instead of reporting them as an
+        // interruption; every other queued event is kept.
+        page.sync();
+        let mut queued = std::collections::VecDeque::new();
+        while let Ok(event) = rx.try_recv() {
+            let stale = match (&event, &new_document_id) {
+                (PageEvent::Navigated(nav), Some(expected)) if nav.frame_id == frame_id => nav
+                    .new_document
+                    .as_ref()
+                    .is_some_and(|doc| doc.document_id.as_deref() != Some(expected.as_str())),
+                _ => false,
+            };
+            if !stale {
+                queued.push_back(event);
+            }
+        }
         let event = loop {
-            let event = page.next_event(&mut rx).await?;
+            let event = match queued.pop_front() {
+                Some(PageEvent::Closed) => return Err(Error::target_closed()),
+                Some(event) => event,
+                None => page.next_event(&mut rx).await?,
+            };
             match event {
                 PageEvent::FrameDetached(id) if id == frame_id => {
                     return Err(Error::frame_detached("Frame was detached"));
@@ -747,6 +782,13 @@ impl Frame {
                 _ => {}
             }
         };
+        // A detach drained along with the commit would otherwise be lost.
+        if queued
+            .iter()
+            .any(|e| matches!(e, PageEvent::FrameDetached(id) if *id == frame_id))
+        {
+            return Err(Error::frame_detached("Navigating frame was detached!"));
+        }
         self.wait_for_lifecycle(&page, &mut rx, wait_until, None)
             .await?;
         Ok(event.response())

@@ -22,11 +22,20 @@ use tokio::sync::Notify;
 pub type Handler = Arc<dyn Fn(Request) -> BoxFuture<'static, Response> + Send + Sync>;
 
 async fn launch_browser() -> Browser {
-    let mut launch = oxidewright::chromium().launch();
-    if let Ok(path) = std::env::var("OXIDEWRIGHT_CHROME") {
-        launch = launch.executable_path(path);
+    // Retried once: on a cold CI runner the first Chrome processes can miss
+    // the launch timeout (the very first tests of a run failed this way).
+    let mut last_error = None;
+    for _ in 0..2 {
+        let mut launch = oxidewright::chromium().launch();
+        if let Ok(path) = std::env::var("OXIDEWRIGHT_CHROME") {
+            launch = launch.executable_path(path);
+        }
+        match launch.await {
+            Ok(browser) => return browser,
+            Err(e) => last_error = Some(e),
+        }
     }
-    launch.await.expect("failed to launch the browser")
+    panic!("failed to launch the browser: {:?}", last_error.unwrap())
 }
 
 /// Everything a test gets.
@@ -43,42 +52,75 @@ where
     F: FnOnce(TestContext) -> Fut + Send + 'static,
     Fut: Future<Output = ()> + Send + 'static,
 {
-    // One browser per test: the test binary has no global teardown, and a
-    // browser left running would keep the process' output pipes open.
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .worker_threads(2)
-        .build()
-        .expect("tokio runtime");
-    runtime.block_on(async move {
-        let browser = launch_browser().await;
-        let server = TestServer::start().await;
-        let setup = async {
-            let context = browser.new_context().await?;
-            let page = context.new_page().await?;
-            Ok::<_, oxidewright::Error>((context, page))
-        };
-        let (context, page) = match setup.await {
-            Ok(v) => v,
-            Err(e) => {
-                let _ = browser.close().await;
-                panic!("test setup failed: {e}");
-            }
-        };
-        let ctx = TestContext {
-            browser: browser.clone(),
-            context,
-            page,
-            server,
-        };
-        let result = tokio::time::timeout(Duration::from_secs(60), tokio::spawn(f(ctx))).await;
-        let _ = tokio::time::timeout(Duration::from_secs(20), browser.close()).await;
-        match result {
-            Ok(Ok(())) => {}
-            Ok(Err(join_error)) => std::panic::resume_unwind(join_error.into_panic()),
-            Err(_) => panic!("test timed out after 60s"),
+    // The test runs on its own thread and is watched from this one with a
+    // plain OS timeout: if every runtime worker blocks (a deadlock on a std
+    // lock, say), tokio's timers stop firing too, so the deadlines inside the
+    // runtime alone cannot catch it. The stuck thread is leaked.
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    let name = std::thread::current().name().unwrap_or("?").to_string();
+    std::thread::Builder::new()
+        .name(format!("{name} (runtime)"))
+        .spawn(move || {
+            // One browser per test: the test binary has no global teardown, and a
+            // browser left running would keep the process' output pipes open.
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .worker_threads(2)
+                .build()
+                .expect("tokio runtime");
+            // Everything, setup included, runs under one deadline, and the runtime is
+            // shut down with a timeout: a stuck task (or a blocking call) used to keep
+            // the whole test binary alive for hours on CI instead of failing the test.
+            let outcome = runtime.block_on(async move {
+                let body = async move {
+                    let browser = launch_browser().await;
+                    let server = TestServer::start().await;
+                    let setup = async {
+                        let context = browser.new_context().await?;
+                        let page = context.new_page().await?;
+                        Ok::<_, oxidewright::Error>((context, page))
+                    };
+                    let (context, page) = match setup.await {
+                        Ok(v) => v,
+                        Err(e) => {
+                            let _ = browser.close().await;
+                            panic!("test setup failed: {e}");
+                        }
+                    };
+                    let ctx = TestContext {
+                        browser: browser.clone(),
+                        context,
+                        page,
+                        server,
+                    };
+                    let result =
+                        tokio::time::timeout(Duration::from_secs(60), tokio::spawn(f(ctx))).await;
+                    let _ = tokio::time::timeout(Duration::from_secs(20), browser.close()).await;
+                    result
+                };
+                tokio::time::timeout(Duration::from_secs(150), tokio::spawn(body)).await
+            });
+            runtime.shutdown_timeout(Duration::from_secs(5));
+            let _ = done_tx.send(outcome);
+        })
+        .expect("test thread");
+    let outcome = match done_rx.recv_timeout(Duration::from_secs(200)) {
+        Ok(outcome) => outcome,
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => panic!(
+            "test hung for 200s with the runtime unresponsive (its timers did not              fire): a worker thread is blocked, likely a deadlock"
+        ),
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            panic!("test runtime thread panicked")
         }
-    });
+    };
+    match outcome {
+        Ok(Ok(Ok(Ok(())))) => {}
+        Ok(Ok(Ok(Err(join_error)))) | Ok(Err(join_error)) => {
+            std::panic::resume_unwind(join_error.into_panic())
+        }
+        Ok(Ok(Err(_))) => panic!("test timed out after 60s"),
+        Err(_) => panic!("test (including setup and teardown) timed out after 150s"),
+    }
 }
 
 #[derive(Clone)]

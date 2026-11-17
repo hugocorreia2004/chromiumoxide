@@ -311,12 +311,19 @@ impl Request {
                 if let Some(v) = f(&state) {
                     return Ok(v);
                 }
-                if state.closed {
+                // A finished request leaves the page's map, so `closed` is not
+                // set for it on close: check the page too.
+                if state.closed || self.inner.page.upgrade().is_none_or(|p| p.is_closed()) {
                     return Err(Error::target_closed());
                 }
             }
-            if rx.changed().await.is_err() {
-                return Err(Error::target_closed());
+            // The sender lives in the request itself, so `changed()` never
+            // fails: re-check periodically in case the page goes away.
+            tokio::select! {
+                changed = rx.changed() => if changed.is_err() {
+                    return Err(Error::target_closed());
+                },
+                _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {}
             }
         }
     }
