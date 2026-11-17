@@ -402,11 +402,18 @@ impl PageInner {
     // ------------------------------------------------------------------
 
     pub(crate) fn subscribe(&self) -> UnboundedReceiver<PageEvent> {
+        // Events already received belong to earlier actions: apply them now
+        // so the new receiver only sees what happens from here on (Playwright
+        // has dispatched them by the time the previous call resolved).
+        self.sync();
         let (tx, rx) = unbounded_channel();
+        // Check `closed` under the lock: `did_close` sets it before taking
+        // the subscribers, so a sender pushed here always gets `Closed`.
+        let mut subscribers = self.subscribers.lock().unwrap();
         if self.is_closed() {
             let _ = tx.send(PageEvent::Closed);
         } else {
-            self.subscribers.lock().unwrap().push(tx);
+            subscribers.push(tx);
         }
         rx
     }
@@ -1489,12 +1496,13 @@ impl IntoFuture for Reload {
                 wait = wait.timeout(timeout);
             }
             let wait = wait.requires_new_document().into_future();
-            self.page
-                .inner
-                .cdp
-                .execute(ReloadParams::default())
-                .await
-                .map_err(|e| Error::from(e).with_api("page.reload"))?;
+            let result = self.page.inner.cdp.execute(ReloadParams::default()).await;
+            if let Err(e) = result {
+                return Err(frame
+                    .closed_or(Error::from(e))
+                    .await
+                    .with_api("page.reload"));
+            }
             wait.await
         })
     }
@@ -1542,20 +1550,23 @@ impl IntoFuture for GoHistory {
                 wait = wait.timeout(timeout);
             }
             let cdp = &self.page.inner.cdp;
-            let history = cdp
-                .execute(GetNavigationHistoryParams::default())
-                .await
-                .map_err(|e| Error::from(e).with_api(api))?
-                .result;
+            let history = cdp.execute(GetNavigationHistoryParams::default()).await;
+            let history = match history {
+                Ok(history) => history.result,
+                Err(e) => return Err(frame.closed_or(Error::from(e)).await.with_api(api)),
+            };
             let index = history.current_index + self.delta;
             if index < 0 || index as usize >= history.entries.len() {
                 return Ok(None);
             }
             let entry = &history.entries[index as usize];
             let wait = wait.into_future();
-            cdp.execute(NavigateToHistoryEntryParams::new(entry.id))
+            if let Err(e) = cdp
+                .execute(NavigateToHistoryEntryParams::new(entry.id))
                 .await
-                .map_err(|e| Error::from(e).with_api(api))?;
+            {
+                return Err(frame.closed_or(Error::from(e)).await.with_api(api));
+            }
             wait.await
         })
     }

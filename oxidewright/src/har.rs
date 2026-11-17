@@ -674,7 +674,8 @@ impl HarRecorder {
                 if let Some(title) = result["title"].as_str() {
                     entry.value["title"] = json!(title);
                 }
-                if let Some(time) = result["time"].as_f64() {
+                // 0 means not set yet (slow runners): leave it to `flush`.
+                if let Some(time) = result["time"].as_f64().filter(|t| *t > 0.0) {
                     let key = if load { "onLoad" } else { "onContentLoad" };
                     entry.value["pageTimings"][key] = json!(round(time - entry.started_ms).max(-1.0));
                 }
@@ -738,7 +739,7 @@ impl HarRecorder {
                 )
                 .isolated_context(true);
             let Ok(Ok(result)) =
-                tokio::time::timeout(std::time::Duration::from_secs(2), eval.into_future()).await
+                tokio::time::timeout(std::time::Duration::from_secs(5), eval.into_future()).await
             else {
                 continue;
             };
