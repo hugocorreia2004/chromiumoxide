@@ -137,6 +137,7 @@ mod page_ext;
 mod page_extras;
 mod pdf;
 mod progress;
+mod proxy;
 mod route;
 mod screencast;
 mod screenshot;

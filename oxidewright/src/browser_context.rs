@@ -35,6 +35,8 @@ pub struct NewContextOptions {
     pub offline: bool,
     /// Credentials for HTTP authentication.
     pub http_credentials: Option<crate::HttpCredentials>,
+    /// Proxy of this context's requests (overrides the browser's).
+    pub proxy: Option<crate::ProxySettings>,
     /// Ignore HTTPS errors.
     pub ignore_https_errors: bool,
     /// Accept downloads (default `true`).
@@ -107,6 +109,7 @@ impl NewContextOptions {
             extra_http_headers: Vec::new(),
             offline: false,
             http_credentials: None,
+            proxy: None,
             ignore_https_errors: false,
             accept_downloads: true,
             record_har: None,

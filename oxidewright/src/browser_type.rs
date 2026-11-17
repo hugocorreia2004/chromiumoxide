@@ -73,6 +73,8 @@ pub struct LaunchOptions {
     /// Profile directory; a fresh temporary one is used (and removed on
     /// close) when `None`.
     pub user_data_dir: Option<PathBuf>,
+    /// Proxy of every request of the browser.
+    pub proxy: Option<crate::ProxySettings>,
 }
 
 impl Default for LaunchOptions {
@@ -85,6 +87,7 @@ impl Default for LaunchOptions {
             timeout: 30_000,
             env: Vec::new(),
             user_data_dir: None,
+            proxy: None,
         }
     }
 }
@@ -136,7 +139,17 @@ impl Launch {
         self
     }
 
-    /// Use a specific profile directory.
+    /// Proxy of every request of the browser (each context can override it
+    /// with [`crate::NewContext::proxy`]). `server` is `http://host:port`,
+    /// `socks5://host:port` or `host:port`; `bypass` is a comma-separated
+    /// list of hosts (`.example.com` matches subdomains). Loopback addresses
+    /// go through the proxy too unless the bypass list names one.
+    pub fn proxy(mut self, proxy: crate::ProxySettings) -> Self {
+        self.options.proxy = Some(proxy);
+        self
+    }
+
+    /// Profile directory (a fresh temporary one when not set).
     pub fn user_data_dir(mut self, dir: impl Into<PathBuf>) -> Self {
         self.options.user_data_dir = Some(dir.into());
         self
@@ -199,6 +212,19 @@ impl IntoFuture for Launch {
                     None => builder.arg(arg.as_str()),
                 };
             }
+            let proxy = options
+                .proxy
+                .as_ref()
+                .map(crate::proxy::normalize)
+                .transpose()?;
+            if let Some(proxy) = &proxy {
+                for (key, value) in crate::proxy::launch_switches(proxy) {
+                    builder = match value {
+                        Some(value) => builder.arg((key.as_str(), value.as_str())),
+                        None => builder.arg(key.as_str()),
+                    };
+                }
+            }
             for (key, value) in &options.env {
                 builder = builder.env(key.clone(), value.clone());
             }
@@ -209,6 +235,7 @@ impl IntoFuture for Launch {
             let inner =
                 BrowserInner::start(cdp, handler, true, owned_profile.then_some(profile_dir))
                     .await?;
+            *inner.ext.proxy.lock().unwrap() = proxy;
             Ok(Browser { inner })
         })
     }

@@ -81,6 +81,15 @@ impl NewContext {
         self
     }
 
+    /// Proxy of this context's requests, overriding the browser's
+    /// ([`crate::Launch::proxy`]). `server` is `http://host:port`,
+    /// `socks5://host:port` or `host:port`; `bypass` is a comma-separated
+    /// list of hosts (`.example.com` matches subdomains).
+    pub fn proxy(mut self, proxy: crate::ProxySettings) -> Self {
+        self.options.proxy = Some(proxy);
+        self
+    }
+
     /// Ignore HTTPS errors (self-signed certificates, ...).
     pub fn ignore_https_errors(mut self, ignore: bool) -> Self {
         self.options.ignore_https_errors = ignore;

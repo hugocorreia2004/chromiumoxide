@@ -27,6 +27,7 @@ mod page_misc;
 mod page_network;
 mod page_route;
 mod page_wait_for;
+mod proxy;
 mod screenshot;
 mod selectors;
 mod smoke;
