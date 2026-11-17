@@ -540,6 +540,8 @@ pub(crate) struct CallOptions {
 
 /// Result of [`call_on_selector`].
 pub(crate) struct CallResult {
+    /// The frame the selector resolved in.
+    pub(crate) frame: Frame,
     pub(crate) frame_visible: bool,
     pub(crate) result: Evaluated,
 }
@@ -660,6 +662,7 @@ pub(crate) async fn call_on_selector(
             ));
         }
         aggregated = Some(CallResult {
+            frame: resolved_frame.clone(),
             frame_visible,
             result: evaluated,
         });

@@ -44,9 +44,9 @@
 //!
 //! ## Where to start
 //!
-//! * [`chromium()`] → [`BrowserType::launch`] / [`BrowserType::connect_over_cdp`]
-//!   → [`Browser`] → [`Browser::new_context`] → [`BrowserContext::new_page`]
-//!   → [`Page`].
+//! * [`chromium()`] ÃƒÂ¢Ã¢â‚¬Â Ã¢â‚¬â„¢ [`BrowserType::launch`] / [`BrowserType::connect_over_cdp`]
+//!   ÃƒÂ¢Ã¢â‚¬Â Ã¢â‚¬â„¢ [`Browser`] ÃƒÂ¢Ã¢â‚¬Â Ã¢â‚¬â„¢ [`Browser::new_context`] ÃƒÂ¢Ã¢â‚¬Â Ã¢â‚¬â„¢ [`BrowserContext::new_page`]
+//!   ÃƒÂ¢Ã¢â‚¬Â Ã¢â‚¬â„¢ [`Page`].
 //! * Find elements with [`Page::locator`] and the `get_by_*` methods
 //!   ([`Locator`]); actions auto-wait like Playwright's ([`actions`]).
 //! * Network: [`Page::route`] ([`Route`]), [`Request`], [`Response`],
@@ -57,7 +57,7 @@
 //! * Errors: [`Error`], whose messages mirror Playwright's.
 //!
 //! The repository has runnable examples in `oxidewright/examples` and a
-//! Playwright → oxidewright guide in `oxidewright/docs/from-playwright.md`.
+//! Playwright ÃƒÂ¢Ã¢â‚¬Â Ã¢â‚¬â„¢ oxidewright guide in `oxidewright/docs/from-playwright.md`.
 //!
 //! ## Conventions
 //!
@@ -99,6 +99,7 @@
 #![allow(clippy::field_reassign_with_default)]
 
 pub mod actions;
+mod aria_snapshot;
 mod browser;
 mod browser_context;
 mod browser_type;
@@ -112,6 +113,7 @@ mod cookies;
 pub mod coverage;
 mod dialog;
 mod download;
+mod drop_action;
 mod element_actions;
 pub mod emulation;
 mod error;
@@ -123,6 +125,7 @@ pub mod fetch;
 mod file_chooser;
 mod frame;
 mod frame_selectors;
+mod frame_wait;
 mod har;
 pub mod input;
 pub mod js;
@@ -135,6 +138,8 @@ mod network_manager;
 mod page;
 mod page_ext;
 mod page_extras;
+mod page_state;
+mod page_tools;
 mod pdf;
 mod progress;
 mod proxy;
@@ -152,9 +157,10 @@ mod worker;
 
 pub use actions::{
     Action, BoundingBox, Click, Dblclick, ElementState, Fill, Hover, InputFiles, Position, Press,
-    SelectOption, SelectOptionAction, SelectValue, SelectValues, SetChecked, SetInputFiles, Tap,
-    Type, WaitForSelector, kinds,
+    QuerySelector, SelectOption, SelectOptionAction, SelectValue, SelectValues, SetChecked,
+    SetInputFiles, Tap, Type, WaitForSelector, kinds,
 };
+pub use aria_snapshot::PageAriaSnapshot;
 pub use browser::Browser;
 pub use browser_context::{BrowserContext, NewContext, NewContextOptions};
 pub use browser_type::{BrowserType, ConnectOverCdp, Launch, LaunchOptions, chromium};
@@ -169,6 +175,7 @@ pub use coverage::{
 };
 pub use dialog::Dialog;
 pub use download::Download;
+pub use drop_action::DropPayload;
 pub use element_actions::WaitForSelectorState;
 pub use emulation::{
     ColorScheme, Contrast, EmulateMedia, ForcedColors, Geolocation, GrantPermissions, Media,
@@ -186,6 +193,7 @@ pub use frame::{
     Frame, FrameEvaluate, FrameEvaluateHandle, Goto, LoadState, SetContent, WaitForLoadState,
     WaitForNavigation, WaitForUrl,
 };
+pub use frame_wait::{Polling, WaitForFunction};
 pub use har::{HarContentPolicy, HarMode, HarNotFound, RecordHar, RouteFromHar};
 pub use input::{
     Keyboard, KeyboardModifier, KeyboardPress, KeyboardType, Mouse, MouseButton, MouseButtonAction,
@@ -194,7 +202,8 @@ pub use input::{
 pub use js::JsValue;
 pub use js_handle::{ElementHandle, EvaluateHandleOn, EvaluateOn, JSHandle};
 pub use locator::{
-    FrameLocator, GetByOptions, GetByRoleOptions, Locator, LocatorOptions, SelectorOrLocator,
+    FrameLocator, GetByOptions, GetByRoleOptions, Highlight, Locator, LocatorOptions,
+    SelectorOrLocator,
 };
 pub use locator_utils::{JsRegex, TextMatch, regex};
 pub use network::{
@@ -203,6 +212,8 @@ pub use network::{
 pub use network_manager::HttpCredentials;
 pub use page::{AddInitScript, GoHistory, InitScript, Page, Reload, ViewportSize};
 pub use page_extras::{AddTag, CloseContext, ClosePage};
+pub use page_state::{AddLocatorHandler, MessagesFilter};
+pub use page_tools::{Content, WebStorage};
 pub use pdf::{Pdf, PdfLength, PdfMargin};
 pub use progress::DEFAULT_TIMEOUT;
 pub use route::{
@@ -221,7 +232,7 @@ pub use trace::{Tracing, TracingStart, TracingStop};
 pub use url_match::{UrlMatch, glob_to_regex_pattern};
 pub use video::Video;
 pub use websocket::{WebSocket, WebSocketEvent, WebSocketPayload};
-pub use worker::{Worker, WorkerEvaluate};
+pub use worker::{Worker, WorkerEvaluate, WorkerEvaluateHandle};
 
 /// Re-export of the underlying CDP library.
 pub use chromiumoxide;

@@ -16,8 +16,7 @@ use crate::element_actions::WaitForSelectorState;
 use crate::error::{Error, Result, ResultExt};
 use crate::frame::Frame;
 use crate::frame_selectors::{
-    CallArg, SelectorTarget, call_injected, query, query_all, query_count,
-    resolve_frames_for_selector, value_of,
+    SelectorTarget, call_injected, query, query_all, query_count, value_of,
 };
 use crate::js_handle::ElementHandle;
 use crate::locator_generators::{as_locator_description, locator_custom_description};
@@ -317,6 +316,10 @@ impl Locator {
 
     fn action<K>(&self, api: &'static str) -> Action<K> {
         Action::new(self.target(), api)
+    }
+
+    pub(crate) fn action_for<K>(&self, api: &'static str) -> Action<K> {
+        self.action(api)
     }
 
     fn check_error(&self) -> Result<()> {
@@ -788,38 +791,33 @@ impl Locator {
         action
     }
 
-    /// Highlight the matching elements on screen (debugging aid).
-    pub async fn highlight(&self) -> Result<()> {
-        self.set_highlight(true).await.api("locator.highlight")
-    }
-
-    /// Remove the highlight added by [`Locator::highlight`].
-    pub async fn hide_highlight(&self) -> Result<()> {
-        self.set_highlight(false).await.api("locator.hideHighlight")
-    }
-
-    async fn set_highlight(&self, show: bool) -> Result<()> {
-        self.check_error()?;
-        let target = SelectorTarget::new(self.selector.clone(), false);
-        for resolved in resolve_frames_for_selector(&self.frame, &target, false).await? {
-            let ctx = resolved.frame.utility_context().await?;
-            let sel = match &resolved.spec {
-                crate::frame_selectors::SelectorSpec::Raw(s) => {
-                    CallArg::Json(Value::String(s.clone()))
-                }
-                crate::frame_selectors::SelectorSpec::Parsed(v) => CallArg::Js(v.clone()),
-            };
-            call_injected(
-                &ctx,
-                "(injected, sel, show) => { const parsed = typeof sel === 'string' ? injected.parseSelector(sel) : sel; injected.setHighlights(show ? [{ selector: parsed }] : []); }",
-                vec![sel, CallArg::Json(Value::Bool(show))],
-                true,
-            )
-            .await?;
+    /// Highlight the matching elements on screen (debugging aid). The
+    /// highlight follows the elements (it is resolved again every second
+    /// and after navigations) until hidden. Builder: .style(css), then
+    /// .await it.
+    pub fn highlight(&self) -> Highlight {
+        Highlight {
+            locator: self.clone(),
+            style: None,
         }
-        Ok(())
     }
 
+    /// Remove the highlight added by [Locator::highlight].
+    pub async fn hide_highlight(&self) -> Result<()> {
+        async {
+            self.check_error()?;
+            let page = self.frame.page_inner().ok_or_else(Error::target_closed)?;
+            crate::page_state::remove_highlight(&page, &self.frame, &self.selector).await;
+            Ok(())
+        }
+        .await
+        .api("locator.hideHighlight")
+    }
+
+    /// The ARIA snapshot of the matching element as a JSON tree.
+    pub fn aria_snapshot_json(&self) -> Action<kinds::AriaSnapshotJson> {
+        self.action("locator.ariaSnapshotJSON")
+    }
     /// A locator with an equivalent, normalized selector (`locator.normalize()`).
     pub async fn normalize(&self) -> Result<Locator> {
         async {
@@ -859,6 +857,48 @@ impl Locator {
         }
         .await
         .api("locator.normalize")
+    }
+}
+
+/// Builder returned by [Locator::highlight]; .await it.
+#[must_use = "builders do nothing unless awaited"]
+pub struct Highlight {
+    locator: Locator,
+    style: Option<String>,
+}
+
+impl Highlight {
+    /// Extra CSS applied to the highlight box, e.g.
+    /// "outline: 2px solid red".
+    pub fn style(mut self, css: impl Into<String>) -> Self {
+        self.style = Some(css.into());
+        self
+    }
+}
+
+impl std::future::IntoFuture for Highlight {
+    type Output = Result<()>;
+    type IntoFuture = std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send>>;
+    fn into_future(self) -> Self::IntoFuture {
+        Box::pin(async move {
+            let locator = self.locator;
+            async {
+                locator.check_error()?;
+                let page = locator
+                    .frame
+                    .page_inner()
+                    .ok_or_else(Error::target_closed)?;
+                crate::page_state::add_highlight(
+                    &page,
+                    &locator.frame,
+                    &locator.selector,
+                    self.style,
+                )
+                .await
+            }
+            .await
+            .api("locator.highlight")
+        })
     }
 }
 

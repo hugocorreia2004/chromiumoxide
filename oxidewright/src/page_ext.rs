@@ -63,6 +63,8 @@ pub(crate) struct PageExt {
     pub(crate) file_chooser_intercepted: AtomicBool,
     /// Requests linked to their redirect (cycles broken on close).
     pub(crate) redirects: Mutex<Vec<Weak<crate::network::RequestInner>>>,
+    /// History, locator handlers and highlights (see `page_state.rs`).
+    pub(crate) state: crate::page_state::PageState,
     initialized: AtomicBool,
 }
 
@@ -81,6 +83,7 @@ impl Default for PageExt {
             console_contexts: Mutex::new(HashMap::new()),
             file_chooser_intercepted: AtomicBool::new(false),
             redirects: Mutex::new(Vec::new()),
+            state: Default::default(),
             initialized: AtomicBool::new(false),
         }
     }
@@ -123,6 +126,7 @@ pub(crate) async fn subscribe(
     one::<EventExceptionThrown>(cdp, tx).await?;
     one::<EventExecutionContextCreated>(cdp, tx).await?;
     one::<EventAttachedToTarget>(cdp, tx).await?;
+    one::<crate::console::ChildSessionRuntimeEvent>(cdp, tx).await?;
     Ok(())
 }
 
@@ -164,6 +168,7 @@ pub(crate) fn handle_event(page: &PageInner, any: AnyArc) {
         EventJavascriptDialogClosed => |p: &PageInner, _ev: Arc<EventJavascriptDialogClosed>| dialog::on_dialog_closed(p),
         EventFileChooserOpened => |p: &PageInner, ev: Arc<EventFileChooserOpened>| file_chooser::on_file_chooser_opened(p, &ev),
         EventTargetCrashed => |p: &PageInner, _ev: Arc<EventTargetCrashed>| on_crashed(p),
+        crate::console::ChildSessionRuntimeEvent => |p: &PageInner, ev: Arc<crate::console::ChildSessionRuntimeEvent>| crate::console::on_child_session_event(p, &ev),
         EventConsoleApiCalled => |p: &PageInner, ev: Arc<EventConsoleApiCalled>| crate::console::on_console_api(p, &ev),
         EventExceptionThrown => |p: &PageInner, ev: Arc<EventExceptionThrown>| crate::console::on_exception(p, &ev),
         EventExecutionContextCreated => |p: &PageInner, ev: Arc<EventExecutionContextCreated>| crate::console::on_context_created(p, &ev),
@@ -185,6 +190,7 @@ pub(crate) fn did_close(page: &PageInner) {
     page.ext.network.close(page);
     websocket::close_all(page);
     worker::close_all(page);
+    page.ext.state.did_close();
     if let Some(inner) = page.self_weak.upgrade() {
         let page = Page::from_inner(inner);
         page.inner.ext.listeners.emit(Event::Close(page.clone()));
