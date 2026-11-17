@@ -655,7 +655,7 @@ impl Frame {
 
     /// A navigation failing because the page is closing reports the closure
     /// (Playwright races navigations against the page's open scope).
-    async fn closed_or(&self, err: Error) -> Error {
+    pub(crate) async fn closed_or(&self, err: Error) -> Error {
         if err.is_target_closed() {
             return err;
         }
@@ -683,11 +683,8 @@ impl Frame {
         progress.log(format!(
             "navigating to \"{url}\", waiting until \"{wait_until}\""
         ));
-        // Apply events already received before subscribing: a lagging pump
-        // would otherwise replay an earlier commit (e.g. the navigation this
-        // one replaces) as if it interrupted ours. Playwright only listens
-        // after `Page.navigate` returns, so it never sees those.
-        page.sync();
+        // `subscribe()` applies the events already received, so a lagging
+        // pump cannot replay an earlier commit as if it interrupted ours.
         let mut rx = page.subscribe();
         let frame_id = self.inner.id.clone();
         let mut detach_rx = page.subscribe();
@@ -722,10 +719,9 @@ impl Frame {
         if let Some(error_text) = result.error_text.filter(|e| !e.is_empty()) {
             // Closing the page aborts its navigation, and Chrome may answer
             // `Page.navigate` with ERR_ABORTED before the close is seen.
-            if Self::closed_soon(&page).await {
-                return Err(Error::target_closed());
-            }
-            return Err(Error::navigation(format!("{error_text} at {url}")));
+            return Err(self
+                .closed_or(Error::navigation(format!("{error_text} at {url}")))
+                .await);
         }
         let new_document_id = result.loader_id.map(|l| l.as_ref().to_string());
         // Commits received before the `Page.navigate` response belong to
@@ -786,20 +782,16 @@ impl Frame {
                 _ => {}
             }
         };
+        // A detach drained along with the commit would otherwise be lost.
+        if queued
+            .iter()
+            .any(|e| matches!(e, PageEvent::FrameDetached(id) if *id == frame_id))
+        {
+            return Err(Error::frame_detached("Navigating frame was detached!"));
+        }
         self.wait_for_lifecycle(&page, &mut rx, wait_until, None)
             .await?;
         Ok(event.response())
-    }
-
-    /// Whether the page gets closed within a short grace period.
-    async fn closed_soon(page: &PageInner) -> bool {
-        for _ in 0..10 {
-            if page.is_closed() {
-                return true;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        page.is_closed()
     }
 
     /// Whether the frame gets detached within a short grace period (a failed

@@ -112,13 +112,24 @@ impl Download {
 
     async fn finished(&self) -> Option<String> {
         let mut rx = self.inner.state.subscribe();
-        let state = rx
-            .wait_for(|s| *s != DownloadState::InProgress)
-            .await
-            .map(|s| s.clone());
-        match state {
-            Ok(DownloadState::Done(failure)) => failure,
-            _ => Some("Download was canceled".into()),
+        loop {
+            if let DownloadState::Done(failure) = &*rx.borrow_and_update() {
+                return failure.clone();
+            }
+            // Chrome reports no progress once the context or browser is gone,
+            // and the sender lives in the download itself: without this check
+            // `path()` / `failure()` would wait forever.
+            let gone = self.inner.browser.upgrade().is_none()
+                || self.inner.page.context().is_none_or(|c| c.is_closed());
+            if gone {
+                return Some("Target page, context or browser has been closed".into());
+            }
+            tokio::select! {
+                changed = rx.changed() => if changed.is_err() {
+                    return Some("Download was canceled".into());
+                },
+                _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {}
+            }
         }
     }
 

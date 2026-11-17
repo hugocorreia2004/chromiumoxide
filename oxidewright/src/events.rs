@@ -477,6 +477,16 @@ impl<T: Send + 'static> WaitForEvent<T> {
         if matches!(emitter, Emitter::Page(_)) && kind != EventKind::Crash {
             kinds.push(EventKind::Crash);
         }
+        // Apply events already received, so an event from an earlier action
+        // does not resolve this wait.
+        match &emitter {
+            Emitter::Page(page) => page.inner.sync(),
+            Emitter::Context(context) => {
+                for page in context.pages() {
+                    page.inner.sync();
+                }
+            }
+        }
         let waiter = emitter.listeners().add_waiter(kinds);
         WaitForEvent {
             emitter,
