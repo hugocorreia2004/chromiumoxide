@@ -768,7 +768,9 @@ impl Frame {
                                 )));
                             }
                             if let Some(error) = nav.error {
-                                return Err(Error::navigation(error));
+                                // A page closing aborts its navigation
+                                // (ERR_ABORTED) just before it is seen closed.
+                                return Err(self.closed_or(Error::navigation(error)).await);
                             }
                             break nav;
                         }
