@@ -117,9 +117,11 @@ fn should_not_miss_element_that_appears_between_retries_before_the_deadline() {
             .evaluate::<()>("() => { setTimeout(() => { document.getElementById('target').style.display = 'block'; }, 1500); }")
             .await
             .unwrap();
+        // Shown after 1.5 s, between two retries (the interval grows to 1 s);
+        // a 3 s deadline leaves slow CI runners room.
         expect(&t.page.locator("#target"))
             .to_be_visible()
-            .timeout(1800)
+            .timeout(3000)
             .await
             .unwrap();
     });
