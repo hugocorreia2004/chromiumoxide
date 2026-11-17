@@ -570,7 +570,8 @@ fn ge_008_watch_position_should_be_notified() {
                 .unwrap();
             let expected = format!("lat={lat} lng={lng}");
             let mut seen = false;
-            for _ in 0..100 {
+            // Up to 10s: slow CI runners took over 2s to deliver a position.
+            for _ in 0..500 {
                 let positions: Vec<String> =
                     t.page.evaluate("() => window.positions").await.unwrap();
                 if positions.contains(&expected) {
