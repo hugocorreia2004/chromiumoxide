@@ -690,13 +690,15 @@ pub(crate) async fn query(frame: &Frame, target: &SelectorTarget) -> Result<Opti
     adopt_to_main(element).await.map(Some)
 }
 
-/// Adopt an element handle to the main world of its frame.
+/// Adopt an element handle to the world `evaluate` runs in: the main world,
+/// or with `stealth` the isolated one, so evaluating on the element never
+/// runs automation code where the page can see it (like Patchright).
 pub(crate) async fn adopt_to_main(element: ElementHandle) -> Result<ElementHandle> {
     let frame = element
         .context()
         .frame()
         .ok_or_else(|| Error::frame_detached("Frame was detached"))?;
-    let main = frame.main_context().await?;
+    let main = frame.context(World::default_evaluate()).await?;
     if element.context().same_context(&main) {
         return Ok(element);
     }
@@ -782,7 +784,7 @@ pub(crate) async fn query_array_in_main_world(
         "({ elements }) => elements",
         CallArg::OptHandle(None),
         CallOptions {
-            main_world: true,
+            main_world: World::default_evaluate() == World::Main,
             ..Default::default()
         },
     )
@@ -790,7 +792,7 @@ pub(crate) async fn query_array_in_main_world(
     match resolved {
         Some(r) => handle_of(r.result),
         None => {
-            let ctx = frame.main_context().await?;
+            let ctx = frame.context(World::default_evaluate()).await?;
             handle_of(call_function(&ctx, "() => []", vec![], false).await?)
         }
     }

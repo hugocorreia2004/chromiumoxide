@@ -531,9 +531,12 @@ pub(crate) async fn init_context(context: &BrowserContext) -> Result<()> {
     *context.inner.emu.geolocation.lock().unwrap() = options.geolocation;
     if options.service_workers == ServiceWorkerPolicy::Block {
         context
-            .add_init_script(
-                "\nif (self.ServiceWorkerContainer) ServiceWorkerContainer.prototype.register = async () => { console.warn('Service Worker registration blocked by Playwright'); };\n",
-            )
+            .add_init_script(if cfg!(feature = "stealth") {
+                // Patchright: no console message naming the automation.
+                "\nif (self.ServiceWorkerContainer) ServiceWorkerContainer.prototype.register = async () => {};\n"
+            } else {
+                "\nif (self.ServiceWorkerContainer) ServiceWorkerContainer.prototype.register = async () => { console.warn('Service Worker registration blocked by Playwright'); };\n"
+            })
             .await?;
     }
     if let Some(permissions) = &options.permissions {

@@ -380,7 +380,9 @@ impl BrowserConfig {
             builder.arg(Arg::value("remote-debugging-port", self.port));
         }
 
-        if self.extensions.is_empty() {
+        // Patchright drops `--disable-extensions`: a browser without any
+        // extension support is an automation hint.
+        if self.extensions.is_empty() && !cfg!(feature = "stealth") {
             builder.arg(Arg::key("disable-extensions"));
         } else {
             builder.args(

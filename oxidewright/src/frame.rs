@@ -467,7 +467,7 @@ impl Frame {
             frame: self.clone(),
             expression: expression.into(),
             arg: Ok(None),
-            world: World::Main,
+            world: World::default_evaluate(),
             api: "frame.evaluate",
             _marker: PhantomData,
         }
@@ -479,7 +479,7 @@ impl Frame {
             frame: self.clone(),
             expression: expression.into(),
             arg: Ok(None),
-            world: World::Main,
+            world: World::default_evaluate(),
             api: "frame.evaluateHandle",
         }
     }

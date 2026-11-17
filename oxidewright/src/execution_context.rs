@@ -30,6 +30,19 @@ use crate::frame::{Frame, FrameInner};
 use crate::js::{self, JsValue, sources};
 use crate::js_handle::JSHandle;
 
+static DEFAULT_ISOLATED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(cfg!(feature = "stealth"));
+
+/// Change where `evaluate`, `evaluate_handle`, `locator.evaluate*` and
+/// element handles run by default, for the whole process: `true` = an
+/// isolated world the page cannot see (the default with `stealth`, like
+/// Patchright's `isolatedContext`), `false` = the page's main world
+/// (Playwright's behavior, needed to read page globals). Each call can still
+/// choose with `.isolated_context(..)`.
+pub fn set_default_isolated_context(isolated: bool) {
+    DEFAULT_ISOLATED.store(isolated, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// Which world of a frame a context belongs to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum World {
@@ -40,6 +53,19 @@ pub enum World {
 }
 
 impl World {
+    /// Where `evaluate` / `evaluate_handle` run unless told otherwise. With
+    /// `stealth`, like Patchright (`isolatedContext = true`): the isolated
+    /// world, so page scripts never see the automation's calls (rebrowser's
+    /// `mainWorldExecution` / `sourceUrlLeak`). Otherwise Playwright's main
+    /// world. `.isolated_context(false)` reaches page globals either way.
+    pub(crate) fn default_evaluate() -> World {
+        if DEFAULT_ISOLATED.load(std::sync::atomic::Ordering::Relaxed) {
+            World::Utility
+        } else {
+            World::Main
+        }
+    }
+
     pub(crate) fn index(self) -> usize {
         match self {
             World::Main => 0,
