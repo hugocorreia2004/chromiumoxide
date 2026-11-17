@@ -101,7 +101,7 @@ fn failure(name: &str, message: String, timeout: u64) -> Error {
 /// ```no_run
 /// # async fn run(page: oxidewright::Page) -> oxidewright::Result<()> {
 /// use oxidewright::expect::to_pass;
-/// to_pass(|| {
+/// to_pass(move || {
 ///     let page = page.clone();
 ///     async move {
 ///         let title = page.title().await?;
@@ -151,6 +151,7 @@ impl<F> ToPass<F> {
     }
 
     /// Expect the block to keep failing until the timeout.
+    #[allow(clippy::should_implement_trait)]
     pub fn not(mut self) -> Self {
         self.is_not = !self.is_not;
         self
@@ -268,6 +269,7 @@ impl<F> Poll<F> {
     }
 
     /// Negate the matcher.
+    #[allow(clippy::should_implement_trait)]
     pub fn not(mut self) -> Self {
         self.is_not = !self.is_not;
         self
