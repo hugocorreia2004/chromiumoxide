@@ -175,11 +175,15 @@ fn should_report_logs_while_waiting_for_visible() {
             .await
             .unwrap();
         rafraf_frame(&frame, 2).await;
+        // Hold each state across a full poll interval (up to 500ms): two
+        // frames are not enough for a poll to see it on a loaded machine.
+        tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
         frame
             .evaluate::<()>("() => document.querySelector('div').remove()")
             .await
             .unwrap();
         rafraf_frame(&frame, 2).await;
+        tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
         frame
             .evaluate::<()>(
                 "() => { const div = document.createElement('div'); div.className = 'another'; div.style.display = 'none'; document.body.appendChild(div); }",
@@ -187,6 +191,7 @@ fn should_report_logs_while_waiting_for_visible() {
             .await
             .unwrap();
         rafraf_frame(&frame, 2).await;
+        tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
         let err = task.await.unwrap().unwrap_err().to_string();
         assert!(
             err.contains("frame.waitForSelector: Timeout 5000ms exceeded."),
