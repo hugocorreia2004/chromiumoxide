@@ -283,6 +283,17 @@ async fn aria_snapshot_for_failure(frame: &Frame, main_world: bool) -> Option<St
     value_of(value).as_str().map(str::to_string)
 }
 
+/// `page.performActionPreChecks` with its log lines appended to `log`.
+async fn pre_checks(frame: &Frame, log: &mut Vec<String>) -> crate::Result<()> {
+    let Some(page) = frame.page_inner() else {
+        return Ok(());
+    };
+    let progress = crate::progress::Progress::new("expect", 0);
+    let result = crate::page_state::perform_action_pre_checks(&page, &progress).await;
+    log.extend(progress.take_log());
+    result
+}
+
 /// Port of `Frame.expect` (server) and `Frame._expect` (client).
 pub(crate) async fn frame_expect(
     frame: &Frame,
@@ -309,6 +320,21 @@ pub(crate) async fn frame_expect(
     let start = Instant::now();
 
     let error = 'run: {
+        // Step 1: locator handlers checkpoint, bound by the timeout.
+        let step1 = pre_checks(frame, &mut log);
+        let step1 = if timeout > 0 {
+            match tokio::time::timeout(Duration::from_millis(timeout), step1).await {
+                Ok(r) => r,
+                Err(_) => break 'run None,
+            }
+        } else {
+            step1.await
+        };
+        if let Err(e) = step1 {
+            if is_non_retriable(&e, Some(frame)) {
+                break 'run Some(e);
+            }
+        }
         // Step 2: one-shot check, not bound by the timeout.
         match expect_internal(frame, &params, &mut log, &mut last).await {
             Ok(matches) if matches != params.is_not => {
@@ -335,6 +361,7 @@ pub(crate) async fn frame_expect(
             };
             let round = async {
                 backoff.wait().await;
+                pre_checks(frame, &mut log).await?;
                 expect_internal(frame, &params, &mut log, &mut last).await
             };
             let result = match remaining {

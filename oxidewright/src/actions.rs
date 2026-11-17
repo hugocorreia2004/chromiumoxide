@@ -560,6 +560,8 @@ pub(crate) struct Opts {
     pub(crate) state: Option<WaitForSelectorState>,
     pub(crate) depth: Option<u32>,
     pub(crate) mode: Option<String>,
+    pub(crate) boxes: Option<bool>,
+    pub(crate) isolated: Option<bool>,
 }
 
 /// A serialized evaluation argument and the handles it references.
@@ -836,6 +838,12 @@ pub mod kinds {
         EvaluateHandle,
         /// `aria_snapshot`
         AriaSnapshot,
+        /// `aria_snapshot_json`
+        AriaSnapshotJson,
+        /// `locator.wait_for_function`
+        WaitForFunction,
+        /// `locator.drop`
+        Drop,
     );
 
     /// `evaluate` on a locator / `eval_on_selector`.
@@ -880,6 +888,7 @@ opts!(kinds::WaitForSelector: Strict, State);
 opts!(kinds::WaitFor: State);
 opts!(kinds::DragAndDrop: Force, Trial, NoWaitAfter, Strict, Steps);
 opts!(kinds::EvaluateHandle: Arg);
+opts!(kinds::WaitForFunction: Arg);
 impl<T> opt::Arg for kinds::Evaluate<T> {}
 impl<T> opt::Arg for kinds::EvaluateAll<T> {}
 impl<T> opt::Arg for kinds::EvalOnSelector<T> {}
@@ -906,18 +915,10 @@ impl Action<kinds::DragAndDrop> {
         self.opts.target_position = Some(position.into());
         self
     }
-}
 
-impl Action<kinds::AriaSnapshot> {
-    /// Maximum depth of the snapshot.
-    pub fn depth(mut self, depth: u32) -> Self {
-        self.opts.depth = Some(depth);
-        self
-    }
-
-    /// Snapshot mode, `"default"` or `"ai"`.
-    pub fn mode(mut self, mode: impl Into<String>) -> Self {
-        self.opts.mode = Some(mode.into());
+    /// `scroll: "none"` (`false`) skips scrolling the elements into view.
+    pub fn scroll(mut self, scroll: bool) -> Self {
+        self.opts.scroll_none = !scroll;
         self
     }
 }
@@ -981,7 +982,7 @@ macro_rules! into_future {
 }
 
 /// Run a task on the target with Playwright's progress semantics.
-async fn run_task<K>(
+pub(crate) async fn run_task<K>(
     action: Action<K>,
     task: Task,
     force: bool,
@@ -1161,14 +1162,6 @@ into_future!(slow kinds::ScrollIntoView => (), |a| async move {
         handle.run_handle_task(&progress, &Task::ScrollIntoView).await.map(|_| ())
     }, false)
     .await
-});
-
-into_future!(kinds::AriaSnapshot => String, |a| async move {
-    let task = Task::AriaSnapshot { depth: a.opts.depth, mode: a.opts.mode.clone() };
-    match run_task(a, task, false, false).await? {
-        TaskOutput::Text(s) => Ok(s),
-        _ => Ok(String::new()),
-    }
 });
 
 /// `Locator._withElement`: resolve the element (strict, attached), run
@@ -1398,7 +1391,7 @@ into_future!(slow kinds::DragAndDrop => (), |a| async move {
         position: a.opts.source_position,
         trial,
         modifiers: None,
-        scroll_none: false,
+        scroll_none: a.opts.scroll_none,
     };
     let target_options = PointerOptions {
         position: a.opts.target_position,
@@ -1797,6 +1790,39 @@ impl ElementHandle {
 // Frame / Page selector API
 // ----------------------------------------------------------------------
 
+/// Builder returned by query_selector of [Page](crate::Page) /
+/// [Frame]; .await it.
+#[must_use = "builders do nothing unless awaited"]
+pub struct QuerySelector {
+    frame: Frame,
+    selector: String,
+    strict: bool,
+    api: &'static str,
+}
+
+impl QuerySelector {
+    /// Fail when the selector matches more than one element.
+    pub fn strict(mut self, strict: bool) -> Self {
+        self.strict = strict;
+        self
+    }
+}
+
+impl IntoFuture for QuerySelector {
+    type Output = Result<Option<ElementHandle>>;
+    type IntoFuture = BoxFuture<Result<Option<ElementHandle>>>;
+    fn into_future(self) -> Self::IntoFuture {
+        Box::pin(async move {
+            query(
+                &self.frame,
+                &SelectorTarget::new(self.selector, self.strict),
+            )
+            .await
+            .map_err(|e| e.with_api(self.api))
+        })
+    }
+}
+
 macro_rules! selector_api {
     ($ty:ty, $prefix:literal, $frame:ident => $get_frame:expr) => {
         impl $ty {
@@ -2015,13 +2041,18 @@ macro_rules! selector_api {
                     .with_text(expression)
             }
 
-            /// The first element matching `selector` (`$`), without waiting.
-            pub async fn query_selector(&self, selector: &str) -> Result<Option<ElementHandle>> {
+            /// The first element matching selector ($), without waiting.
+            /// Builder: .strict(true) fails when several elements match;
+            /// .await it.
+            pub fn query_selector(&self, selector: &str) -> QuerySelector {
                 let $frame = self;
                 let frame: Frame = $get_frame;
-                query(&frame, &SelectorTarget::new(selector, false))
-                    .await
-                    .map_err(|e| e.with_api(concat!($prefix, ".$")))
+                QuerySelector {
+                    frame,
+                    selector: selector.to_string(),
+                    strict: false,
+                    api: concat!($prefix, ".$"),
+                }
             }
 
             /// All elements matching `selector` (`$$`).

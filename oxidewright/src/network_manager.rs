@@ -739,6 +739,7 @@ fn on_request(
         }
         return;
     }
+    page.ext.state.add_request(&request);
     emit_on_context(page, Event::Request(request.clone()));
     if let Some(shared) = route_shared {
         state.routes_in_flight += 1;

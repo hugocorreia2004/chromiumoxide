@@ -34,6 +34,12 @@ use chromiumoxide_cdp::cdp::browser_protocol::{
 use chromiumoxide_cdp::cdp::events::CdpEvent;
 use chromiumoxide_types::{Command, Method, MethodId, Request, Response};
 
+/// Method of the custom event carrying a `Runtime.consoleAPICalled` or
+/// `Runtime.exceptionThrown` event of a child session (dedicated worker,
+/// out-of-process frame) of a page: `{ sessionId, method, params }`. It is
+/// delivered to the page's listeners right before the typed event.
+pub const CHILD_SESSION_RUNTIME_EVENT: &str = "Chromiumoxide.childSessionRuntimeEvent";
+
 use crate::auth::Credentials;
 use crate::cdp::browser_protocol::target::CloseTargetParams;
 use crate::cmd::CommandChain;
@@ -1629,6 +1635,31 @@ impl Target {
         }
         while let Some(request) = self.network_manager.poll_session_request() {
             self.queued_events.push_back(TargetEvent::Request(request));
+        }
+        // Typed events do not say which session they come from: `Runtime`
+        // console/exception events of child sessions (dedicated workers,
+        // out-of-process frames) are also delivered, tagged with their
+        // session, as the custom event `CHILD_SESSION_RUNTIME_EVENT` (before
+        // the typed event).
+        if let Some(child) = event_session_id
+            .as_ref()
+            .filter(|s| Some(*s) != self.frame_manager.main_session_id())
+        {
+            let tagged = match &params {
+                CdpEvent::RuntimeConsoleApiCalled(ev) => serde_json::to_value(ev).ok(),
+                CdpEvent::RuntimeExceptionThrown(ev) => serde_json::to_value(ev).ok(),
+                _ => None,
+            };
+            if let Some(tagged) = tagged {
+                let _ = self.event_listeners.try_send_custom(
+                    CHILD_SESSION_RUNTIME_EVENT,
+                    serde_json::json!({
+                        "sessionId": child.as_ref(),
+                        "method": method.as_ref(),
+                        "params": tagged,
+                    }),
+                );
+            }
         }
         chromiumoxide_cdp::consume_event!(match params {
            |ev| self.event_listeners.start_send(ev),

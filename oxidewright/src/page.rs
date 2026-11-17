@@ -599,6 +599,9 @@ impl PageInner {
         }
         let current = data.current_document.clone();
         fx.invalidate.push(data.frame.clone());
+        if state.main.as_deref() == Some(id) {
+            self.ext.state.mark_navigation();
+        }
         self.clear_lifecycle_locked(state, id, fx);
         fx.events.push(PageEvent::Navigated(NavigationEvent {
             frame_id: id.to_string(),
@@ -812,6 +815,16 @@ impl PageInner {
     // ------------------------------------------------------------------
     // Network bookkeeping (navigation requests and network idleness)
     // ------------------------------------------------------------------
+
+    /// `pendingDocument()` of the main frame: `Some(url of its request)`
+    /// while a navigation of the main frame is pending.
+    pub(crate) fn main_pending_navigation(&self) -> Option<Option<String>> {
+        self.sync();
+        let state = self.tree.lock().unwrap();
+        let main = state.main.as_ref()?;
+        let pending = state.frames.get(main)?.pending_document.as_ref()?;
+        Some(pending.request.as_ref().map(|r| r.url()))
+    }
 
     /// `FrameManager.requestStarted` bookkeeping: in-flight requests,
     /// network idleness and the pending document of navigations.
@@ -1239,12 +1252,10 @@ impl Page {
             .map_err(|e| rename_api(e, "page.title"))
     }
 
-    /// The full HTML of the page.
-    pub async fn content(&self) -> Result<String> {
-        self.main_frame()
-            .content()
-            .await
-            .map_err(|e| rename_api(e, "page.content"))
+    /// The full HTML of the page. Builder: `.include_shadow(true)` also
+    /// serializes open shadow roots; `.await` it.
+    pub fn content(&self) -> crate::page_tools::Content {
+        crate::page_tools::Content::new(self.main_frame(), "page.content")
     }
 
     /// Replace the page's document with `html`.

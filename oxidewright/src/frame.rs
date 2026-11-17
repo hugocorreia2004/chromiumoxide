@@ -309,6 +309,13 @@ impl Frame {
         }
     }
 
+    /// The execution context of `world` if it exists already.
+    pub(crate) fn existing_context(&self, world: World) -> Option<ExecutionContext> {
+        self.inner.contexts.lock().unwrap()[world.index()]
+            .clone()
+            .filter(|c| !c.is_destroyed())
+    }
+
     /// The execution context of `world`, created on demand.
     pub(crate) async fn context(&self, world: World) -> Result<ExecutionContext> {
         let index = world.index();
@@ -522,12 +529,10 @@ impl Frame {
     }
 
     /// The full HTML contents of the frame, including the doctype.
-    pub async fn content(&self) -> Result<String> {
-        self.utility_evaluate(
-            "() => { let retVal = ''; if (document.doctype) retVal = new XMLSerializer().serializeToString(document.doctype); if (document.documentElement) retVal += document.documentElement.outerHTML; return retVal; }",
-        )
-        .await
-        .map_err(|e| e.with_api("frame.content"))
+    /// Builder: `.include_shadow(true)` also serializes open shadow roots;
+    /// `.await` it.
+    pub fn content(&self) -> crate::page_tools::Content {
+        crate::page_tools::Content::new(self.clone(), "frame.content")
     }
 
     /// The `<iframe>`/`<frame>` element hosting this frame.
