@@ -175,6 +175,24 @@ impl Download {
         .api("download.saveAs")
     }
 
+    /// Wait for the download to finish and open the file for reading
+    /// (Playwright's `createReadStream`).
+    pub async fn create_read_stream(&self) -> Result<tokio::fs::File> {
+        async {
+            if !self.inner.accepted {
+                return Err(Error::invalid_argument(DENIED));
+            }
+            if let Some(failure) = self.finished().await {
+                return Err(Error::navigation(failure));
+            }
+            tokio::fs::File::open(&self.inner.path)
+                .await
+                .map_err(|e| Error::invalid_argument(e.to_string()))
+        }
+        .await
+        .api("download.createReadStream")
+    }
+
     /// Wait for the download to finish; `Some(error)` if it failed (e.g.
     /// `canceled`).
     pub async fn failure(&self) -> Result<Option<String>> {
