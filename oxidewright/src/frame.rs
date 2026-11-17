@@ -717,8 +717,31 @@ impl Frame {
             return Err(Error::navigation(format!("{error_text} at {url}")));
         }
         let new_document_id = result.loader_id.map(|l| l.as_ref().to_string());
+        // Commits received before the `Page.navigate` response belong to
+        // earlier navigations (the one this replaces, whose event may still
+        // have been in flight when we subscribed). Playwright only listens
+        // after the response, so drop those instead of reporting them as an
+        // interruption; every other queued event is kept.
+        page.sync();
+        let mut queued = std::collections::VecDeque::new();
+        while let Ok(event) = rx.try_recv() {
+            let stale = match (&event, &new_document_id) {
+                (PageEvent::Navigated(nav), Some(expected)) if nav.frame_id == frame_id => nav
+                    .new_document
+                    .as_ref()
+                    .is_some_and(|doc| doc.document_id.as_deref() != Some(expected.as_str())),
+                _ => false,
+            };
+            if !stale {
+                queued.push_back(event);
+            }
+        }
         let event = loop {
-            let event = page.next_event(&mut rx).await?;
+            let event = match queued.pop_front() {
+                Some(PageEvent::Closed) => return Err(Error::target_closed()),
+                Some(event) => event,
+                None => page.next_event(&mut rx).await?,
+            };
             match event {
                 PageEvent::FrameDetached(id) if id == frame_id => {
                     return Err(Error::frame_detached("Frame was detached"));
