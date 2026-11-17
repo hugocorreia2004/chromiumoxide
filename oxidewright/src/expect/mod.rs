@@ -54,6 +54,7 @@
 mod aria;
 mod engine;
 mod format;
+mod poll;
 mod screenshot;
 
 use std::future::{Future, IntoFuture};
@@ -75,6 +76,7 @@ use engine::{ExpectOutcome, ExpectParams, frame_expect, js_string};
 use format::{MessageDetails, format_matcher_message, print_diff_or_stringify, stringify};
 
 pub use aria::ToMatchAriaSnapshot;
+pub use poll::{Poll, ToPass, poll, to_pass};
 pub use screenshot::ToHaveScreenshot;
 
 static DEFAULT_TIMEOUT: AtomicU64 = AtomicU64::new(5_000);
@@ -755,7 +757,7 @@ impl LocatorAssertions {
         })
     }
     /// The element has the ARIA role.
-    pub fn to_have_role(&self, role: &str) -> Assertion<kinds::Plain> {
+    pub fn to_have_role(&self, role: &str) -> Assertion<kinds::IgnoreCase> {
         self.assertion(Spec::Text {
             name: "toHaveRole",
             expected: ExpectedText::One(TextMatch::Text(role.to_string())),
