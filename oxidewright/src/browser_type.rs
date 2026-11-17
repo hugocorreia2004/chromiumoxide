@@ -149,6 +149,96 @@ impl Launch {
     }
 }
 
+/// Playwright's `chromiumSwitches`. With `stealth`, Patchright's changes:
+/// no `--enable-automation` and none of the switches it drops, plus
+/// `--disable-blink-features=AutomationControlled` (no
+/// `navigator.webdriver = true`). `--disable-back-forward-cache` stays: the
+/// navigation tracking needs lifecycle events for history navigations.
+fn chromium_switches() -> Vec<String> {
+    let disabled_features = [
+        "AvoidUnnecessaryBeforeUnloadCheckSync",
+        "DestroyProfileOnBrowserClose",
+        "HttpsUpgrades",
+        "HttpsFirstBalancedModeAutoEnable",
+        "LensOverlay",
+        // Patchright 1.64 keeps the media router (cast) like a normal Chrome.
+        if cfg!(feature = "stealth") {
+            ""
+        } else {
+            "MediaRouter"
+        },
+        "PaintHolding",
+        // Not with `stealth`: an iframe could then read another site's
+        // storage, which detectors check (Patchright still disables it).
+        if cfg!(feature = "stealth") {
+            ""
+        } else {
+            "ThirdPartyStoragePartitioning"
+        },
+        "AvoidCorsURLLoaderRestartOnRedirect",
+        "TcpPortRandomizationWin",
+        "OptimizationHints",
+        "NetworkTimeServiceQuerying",
+        "AimEnabled",
+        "PreconnectToSearch",
+    ]
+    .into_iter()
+    .filter(|f| !f.is_empty())
+    .collect::<Vec<_>>()
+    .join(",");
+    let mut switches: Vec<String> = [
+        "disable-field-trial-config",
+        "disable-background-networking",
+        "disable-background-timer-throttling",
+        "disable-backgrounding-occluded-windows",
+        "disable-back-forward-cache",
+        "disable-breakpad",
+        "no-default-browser-check",
+        "disable-dev-shm-usage",
+        "disable-hang-monitor",
+        "disable-prompt-on-repost",
+        "disable-renderer-backgrounding",
+        "force-color-profile=srgb",
+        "no-first-run",
+        "password-store=basic",
+        "use-mock-keychain",
+        "no-service-autorun",
+        "disable-search-engine-choice-screen",
+        "enable-unsafe-swiftshader",
+        "disable-stack-profiler",
+        "disable-infobars",
+        "disable-sync",
+        "do-not-de-elevate",
+    ]
+    .into_iter()
+    .map(String::from)
+    .collect();
+    switches.push(format!("disable-features={disabled_features}"));
+    switches.push(
+        "enable-features=CDPScreenshotNewSurface,SkipListAccountsWithoutGaiaCookies".to_string(),
+    );
+    if cfg!(feature = "stealth") {
+        switches.push("disable-blink-features=AutomationControlled".to_string());
+    } else {
+        // Switches Patchright drops, as they hint at automation.
+        switches.extend(
+            [
+                "enable-automation",
+                "disable-component-extensions-with-background-pages",
+                "disable-component-update",
+                "disable-default-apps",
+                "allow-pre-commit-input",
+                "disable-ipc-flooding-protection",
+                "disable-popup-blocking",
+                "metrics-recording-only",
+                "unsafely-disable-devtools-self-xss-warnings",
+            ]
+            .map(String::from),
+        );
+    }
+    switches
+}
+
 fn parse_arg(raw: &str) -> String {
     raw.trim_start_matches('-').to_string()
 }
@@ -172,6 +262,8 @@ impl IntoFuture for Launch {
                 }
             };
             let mut builder = BrowserConfig::builder()
+                .disable_default_args()
+                .args(chromium_switches())
                 .viewport(None)
                 .user_data_dir(&profile_dir)
                 .request_timeout(Duration::from_secs(600));
@@ -189,9 +281,6 @@ impl IntoFuture for Launch {
             if let Some(path) = &options.executable_path {
                 builder = builder.chrome_executable(path);
             }
-            // Like Playwright: navigations must not be restored from the
-            // back/forward cache (they would not fire lifecycle events).
-            builder = builder.arg("disable-back-forward-cache");
             for raw in &options.args {
                 let arg = parse_arg(raw);
                 builder = match arg.split_once('=') {
