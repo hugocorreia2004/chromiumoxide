@@ -9,8 +9,8 @@ every class next to its Rust form.
 ### Names
 
 Methods are `snake_case`: `page.waitForLoadState()` is `page.wait_for_load_state()`.
-Acronyms are lowercased as words (`setExtraHTTPHeaders` ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ `set_extra_http_headers`,
-`newCDPSession` ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ `new_cdp_session`). Names that are Rust keywords have a raw form and an
+Acronyms are lowercased as words (`setExtraHTTPHeaders` → `set_extra_http_headers`,
+`newCDPSession` → `new_cdp_session`). Names that are Rust keywords have a raw form and an
 alias:
 
 | Playwright | Rust |
@@ -39,8 +39,8 @@ let browser = chromium().launch().headless(false).args(["--lang=en-US"]).await?;
 ```
 
 A builder only has the options its action accepts (`click` has `button`, `fill` does not).
-String unions become enums (`'domcontentloaded'` ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ `LoadState::DomContentLoaded`, `'right'`
-ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ `MouseButton::Right`). Timeouts are `u64` milliseconds. Optional overloads become `_with`
+String unions become enums (`'domcontentloaded'` → `LoadState::DomContentLoaded`, `'right'`
+→ `MouseButton::Right`). Timeouts are `u64` milliseconds. Optional overloads become `_with`
 variants taking an options value: `page.getByRole('button', { name: 'OK' })` is
 `page.get_by_role_with("button", GetByRoleOptions::new().name("OK"))`, and
 `page.locator('li', { hasText: 'x' })` is
@@ -869,6 +869,7 @@ Also: `page`, `is_closed`.
 | Playwright | oxidewright | Notes |
 |---|---|---|
 | `session.on()` | `session.event_listener::<EventType>().await` | a typed stream of chromiumoxide CDP events |
+| `session.on('event', ...)` | `session.all_events().await` | every event as `CdpEvent { method, params }` |
 | `session.removeListener()` | missing | drop the stream |
 | `session.once()` | `session.event_listener::<EventType>().await` | take one item from the stream |
 | `session.send()` | `session.send("Method.name", json!({..})).timeout(ms).await` | returns `serde_json::Value` |

@@ -44,9 +44,9 @@
 //!
 //! ## Where to start
 //!
-//! * [`chromium()`] ÃƒÂ¢Ã¢â‚¬Â Ã¢â‚¬â„¢ [`BrowserType::launch`] / [`BrowserType::connect_over_cdp`]
-//!   ÃƒÂ¢Ã¢â‚¬Â Ã¢â‚¬â„¢ [`Browser`] ÃƒÂ¢Ã¢â‚¬Â Ã¢â‚¬â„¢ [`Browser::new_context`] ÃƒÂ¢Ã¢â‚¬Â Ã¢â‚¬â„¢ [`BrowserContext::new_page`]
-//!   ÃƒÂ¢Ã¢â‚¬Â Ã¢â‚¬â„¢ [`Page`].
+//! * [`chromium()`] → [`BrowserType::launch`] / [`BrowserType::connect_over_cdp`]
+//!   → [`Browser`] → [`Browser::new_context`] → [`BrowserContext::new_page`]
+//!   → [`Page`].
 //! * Find elements with [`Page::locator`] and the `get_by_*` methods
 //!   ([`Locator`]); actions auto-wait like Playwright's ([`actions`]).
 //! * Network: [`Page::route`] ([`Route`]), [`Request`], [`Response`],
@@ -57,7 +57,7 @@
 //! * Errors: [`Error`], whose messages mirror Playwright's.
 //!
 //! The repository has runnable examples in `oxidewright/examples` and a
-//! Playwright ÃƒÂ¢Ã¢â‚¬Â Ã¢â‚¬â„¢ oxidewright guide in `oxidewright/docs/from-playwright.md`.
+//! Playwright → oxidewright guide in `oxidewright/docs/from-playwright.md`.
 //!
 //! ## Conventions
 //!
@@ -175,6 +175,8 @@ pub use browser_type::{
 };
 pub use cdp_session::{CDPSession, CdpSend, CdpSessionTarget};
 pub use chromium_tracing::StartTracing;
+/// An event of a CDP session, see [`CDPSession::all_events`].
+pub use chromiumoxide::listeners::AnyEvent as CdpEvent;
 pub use clock::{Clock, ClockInstall, ClockTicks, ClockTime};
 pub use console::{ConsoleMessage, ConsoleMessageLocation, WebError};
 pub use context_options::{Device, devices};

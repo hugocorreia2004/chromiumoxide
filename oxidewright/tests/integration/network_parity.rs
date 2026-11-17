@@ -602,3 +602,27 @@ fn sw_service_workers_should_return_current_workers() {
         assert_eq!(leaked.to_json(), json!([]));
     });
 }
+
+#[test]
+fn cd_049_should_emit_event_for_each_cdp_event() {
+    run(|t| async move {
+        use futures::StreamExt;
+        let session = t.context.new_cdp_session(&t.page).await.unwrap();
+        session.send("Network.enable", json!({})).await.unwrap();
+        let mut events = session.all_events().await.unwrap();
+        t.page.goto(&t.server.empty_page).await.unwrap();
+        let mut seen = 0;
+        let request = loop {
+            let event = tokio::time::timeout(Duration::from_secs(10), events.next())
+                .await
+                .unwrap()
+                .unwrap();
+            seen += 1;
+            if event.method == "Network.requestWillBeSent" {
+                break event;
+            }
+        };
+        assert!(seen > 0);
+        assert_eq!(request.params["request"]["url"], t.server.empty_page);
+    });
+}

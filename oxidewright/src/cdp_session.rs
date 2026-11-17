@@ -186,6 +186,13 @@ impl CDPSession {
         }
     }
 
+    /// Every event of the session as `{ method, params }` (Playwright's
+    /// `cdpSession.on('event')`). Not available for frame sessions.
+    pub async fn all_events(&self) -> Result<EventStream<chromiumoxide::listeners::AnyEvent>> {
+        self.event_listener::<chromiumoxide::listeners::AnyEvent>()
+            .await
+    }
+
     /// Detach the session: later `send` calls fail and the `close` event
     /// fires.
     pub async fn detach(&self) -> Result<()> {
