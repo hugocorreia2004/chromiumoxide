@@ -75,6 +75,8 @@ pub(crate) async fn with_slow_mo<T>(
 #[derive(Default)]
 pub(crate) struct BrowserExt {
     pub(crate) downloads: crate::download::BrowserDownloads,
+    /// `browser.startTracing()` recording.
+    pub(crate) chromium_tracing: crate::chromium_tracing::TracingState,
     /// The launch proxy (its credentials answer contexts without their own).
     pub(crate) proxy: Mutex<Option<crate::ProxySettings>>,
 }

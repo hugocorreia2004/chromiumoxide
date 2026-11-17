@@ -106,6 +106,7 @@ mod browser_context;
 mod browser_type;
 mod cdp_raw;
 mod cdp_session;
+mod chromium_tracing;
 mod clock;
 mod console;
 mod context_ext;
@@ -173,6 +174,7 @@ pub use browser_type::{
     chromium,
 };
 pub use cdp_session::{CDPSession, CdpSend, CdpSessionTarget};
+pub use chromium_tracing::StartTracing;
 pub use clock::{Clock, ClockInstall, ClockTicks, ClockTime};
 pub use console::{ConsoleMessage, ConsoleMessageLocation, WebError};
 pub use context_options::{Device, devices};

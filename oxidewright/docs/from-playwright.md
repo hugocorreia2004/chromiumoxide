@@ -201,8 +201,8 @@ are omitted unless they illustrate the builder.
 | `browser.newBrowserCDPSession()` | `browser.new_browser_cdp_session().await` |  |
 | `browser.newContext()` | `browser.new_context().locale("en-US").await` | every context option is a builder method |
 | `browser.newPage()` | `browser.new_page().locale("de-DE").await` | every context option; the page owns its context (closing the page closes it, `context.new_page()` fails) |
-| `browser.startTracing()` | missing | not implemented yet |
-| `browser.stopTracing()` | missing | not implemented yet |
+| `browser.startTracing(page, { path, screenshots, categories })` | `browser.start_tracing().page(&page).path(p).screenshots(true).categories([..])` | Chromium performance trace (DevTools Performance panel) |
+| `browser.stopTracing()` | `browser.stop_tracing()` | returns the trace JSON bytes |
 | `browser.unbind()` | missing | not implemented yet |
 | `browser.version()` | `browser.version()` |  |
 

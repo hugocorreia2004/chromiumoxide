@@ -5,6 +5,7 @@ mod actions_smoke;
 mod browser;
 mod browser_api;
 mod browsercontext_fetch;
+mod chromium_tracing;
 mod clicks;
 mod common;
 mod content;
