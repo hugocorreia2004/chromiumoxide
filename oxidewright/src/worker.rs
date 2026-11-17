@@ -18,7 +18,6 @@ use serde::de::DeserializeOwned;
 
 use crate::error::{Error, Result, ResultExt};
 use crate::events::Event;
-use crate::network_manager::send;
 use crate::page::{Page, PageInner};
 
 type BoxFuture<T> = Pin<Box<dyn Future<Output = T> + Send>>;
@@ -33,6 +32,9 @@ struct WorkerInner {
     url: String,
     session: SessionId,
     page: Weak<PageInner>,
+    /// Commands go through the browser connection (service workers have
+    /// no page).
+    browser: Weak<crate::browser::BrowserInner>,
     closed: AtomicBool,
     attached_at: std::time::Instant,
     close_handlers: Mutex<Vec<Arc<dyn Fn() + Send + Sync>>>,
@@ -98,7 +100,27 @@ impl Worker {
         }
     }
 
-    fn mark_closed(&self) {
+    /// A service worker attached by the browser (see `service_worker.rs`).
+    pub(crate) fn new_service_worker(
+        url: String,
+        session: SessionId,
+        browser: Weak<crate::browser::BrowserInner>,
+    ) -> Worker {
+        Worker {
+            inner: Arc::new(WorkerInner {
+                url,
+                session,
+                page: Weak::new(),
+                browser,
+                closed: AtomicBool::new(false),
+                attached_at: std::time::Instant::now(),
+                close_handlers: Mutex::new(Vec::new()),
+                close_tx: tokio::sync::watch::channel(false).0,
+            }),
+        }
+    }
+
+    pub(crate) fn mark_closed(&self) {
         if self.inner.closed.swap(true, Ordering::SeqCst) {
             return;
         }
@@ -134,10 +156,10 @@ impl<T: DeserializeOwned + Send + 'static> IntoFuture for WorkerEvaluate<T> {
         Box::pin(async move {
             async {
                 let arg = self.arg?;
-                let page = self
+                let browser = self
                     .worker
                     .inner
-                    .page
+                    .browser
                     .upgrade()
                     .ok_or_else(Error::target_closed)?;
                 // The CDP layer registers the worker session right after the
@@ -155,7 +177,9 @@ impl<T: DeserializeOwned + Send + 'static> IntoFuture for WorkerEvaluate<T> {
                 let mut params = EvaluateParams::new(expression);
                 params.return_by_value = Some(true);
                 params.await_promise = Some(true);
-                let result = send(&page, Some(self.worker.inner.session.clone()), params).await?;
+                let result = browser
+                    .execute_with_session(params, Some(self.worker.inner.session.clone()))
+                    .await?;
                 if let Some(details) = result.exception_details {
                     return Err(Error::evaluation(
                         crate::execution_context::exception_message(&details),
@@ -180,6 +204,7 @@ pub(crate) fn on_attached(page: &PageInner, ev: &EventAttachedToTarget) {
             url: ev.target_info.url.clone(),
             session: ev.session_id.clone(),
             page: page.self_weak.clone(),
+            browser: page.browser.clone(),
             closed: AtomicBool::new(false),
             attached_at: std::time::Instant::now(),
             close_handlers: Mutex::new(Vec::new()),

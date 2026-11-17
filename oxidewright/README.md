@@ -104,7 +104,8 @@ cargo run -p oxidewright --example locators_forms
 What oxidewright never sends:
 
 * `Runtime.enable`, `Log.enable`, `Performance.enable` (also not by chromiumoxide with the
-  `stealth` feature), and no `Runtime.addBinding` (no `expose_function`).
+  `stealth` feature). `Runtime.addBinding` is sent only by `expose_function`/`expose_binding`
+  (with the user's name, like Patchright) and by `route_web_socket` (`__pwWebSocketBinding`).
 * No utility world created at attach. Execution contexts are created on demand with
   `Page.createIsolatedWorld` (random name), cached per frame and dropped on navigation or
   detach. The selector engine and actions run in that isolated world, which shares the DOM

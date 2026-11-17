@@ -99,6 +99,7 @@
 #![allow(clippy::field_reassign_with_default)]
 
 pub mod actions;
+mod binding;
 mod browser;
 mod browser_context;
 mod browser_type;
@@ -110,6 +111,7 @@ mod context_ext;
 mod context_options;
 mod cookies;
 pub mod coverage;
+mod credentials;
 mod dialog;
 mod download;
 mod element_actions;
@@ -143,10 +145,12 @@ mod screencast;
 mod screenshot;
 mod selector_parser;
 mod selectors;
+mod service_worker;
 mod storage_state;
 pub mod trace;
 mod url_match;
 pub mod video;
+mod web_socket_route;
 mod websocket;
 mod worker;
 
@@ -155,10 +159,11 @@ pub use actions::{
     SelectOption, SelectOptionAction, SelectValue, SelectValues, SetChecked, SetInputFiles, Tap,
     Type, WaitForSelector, kinds,
 };
+pub use binding::{BindingError, BindingSource, ExposedBinding};
 pub use browser::Browser;
 pub use browser_context::{BrowserContext, NewContext, NewContextOptions};
 pub use browser_type::{BrowserType, ConnectOverCdp, Launch, LaunchOptions, chromium};
-pub use cdp_session::{CDPSession, CdpSessionTarget};
+pub use cdp_session::{CDPSession, CdpSend, CdpSessionTarget};
 pub use clock::{Clock, ClockInstall, ClockTicks, ClockTime};
 pub use console::{ConsoleMessage, ConsoleMessageLocation, WebError};
 pub use context_options::{Device, devices};
@@ -167,6 +172,7 @@ pub use coverage::{
     CoverageRange, CssCoverageEntry, FunctionCoverage, JsCoverageEntry, StartCssCoverage,
     StartJsCoverage, TextRange,
 };
+pub use credentials::{CreateCredential, Credentials, GetCredentials, VirtualCredential};
 pub use dialog::Dialog;
 pub use download::Download;
 pub use element_actions::WaitForSelectorState;
@@ -181,12 +187,12 @@ pub use fetch::{
     APIRequest, APIRequestContext, FilePayload, HttpCredentialsSend, MultipartValue, ProxySettings,
     RequestData, request,
 };
-pub use file_chooser::FileChooser;
+pub use file_chooser::{FileChooser, SetFiles};
 pub use frame::{
     Frame, FrameEvaluate, FrameEvaluateHandle, Goto, LoadState, SetContent, WaitForLoadState,
     WaitForNavigation, WaitForUrl,
 };
-pub use har::{HarContentPolicy, HarMode, HarNotFound, RecordHar, RouteFromHar};
+pub use har::{HarContentPolicy, HarMode, HarNotFound, RecordHar, RouteFromHar, StartHar};
 pub use input::{
     Keyboard, KeyboardModifier, KeyboardPress, KeyboardType, Mouse, MouseButton, MouseButtonAction,
     MouseClick, MouseMove, Touchscreen,
@@ -214,12 +220,14 @@ pub use screenshot::{
     ScreenshotType,
 };
 pub use selectors::{Selectors, selectors};
+pub use service_worker::WaitForServiceWorker;
 pub use storage_state::{
     NameValue, OriginState, StorageState, StorageStateBuilder, StorageStateSource,
 };
 pub use trace::{Tracing, TracingStart, TracingStop};
 pub use url_match::{UrlMatch, glob_to_regex_pattern};
 pub use video::Video;
+pub use web_socket_route::{WebSocketRoute, WebSocketRouteServer};
 pub use websocket::{WebSocket, WebSocketEvent, WebSocketPayload};
 pub use worker::{Worker, WorkerEvaluate};
 

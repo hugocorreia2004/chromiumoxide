@@ -309,6 +309,14 @@ impl Frame {
         }
     }
 
+    /// The cached execution context of `world`, if one was created and is
+    /// still alive (never creates one).
+    pub(crate) fn cached_context(&self, world: World) -> Option<ExecutionContext> {
+        self.inner.contexts.lock().unwrap()[world.index()]
+            .clone()
+            .filter(|c| !c.is_destroyed())
+    }
+
     /// The execution context of `world`, created on demand.
     pub(crate) async fn context(&self, world: World) -> Result<ExecutionContext> {
         let index = world.index();
@@ -331,6 +339,12 @@ impl Frame {
             let generation = self.inner.context_gen.load(Ordering::SeqCst);
             match self.create_context(world).await {
                 Ok(ctx) => {
+                    if world == World::Main {
+                        // Exposed bindings, per context like Patchright
+                        // (`Runtime.addBinding` only reaches new documents
+                        // with `Runtime.enable`).
+                        crate::binding::on_main_context(self, &ctx).await;
+                    }
                     if generation == self.inner.context_gen.load(Ordering::SeqCst) {
                         self.inner.contexts.lock().unwrap()[index] = Some(ctx.clone());
                         return Ok(ctx);

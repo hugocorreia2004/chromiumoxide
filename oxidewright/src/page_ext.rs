@@ -23,8 +23,8 @@ use chromiumoxide::cdp::browser_protocol::target::{
     EventAttachedToTarget, EventDetachedFromTarget, EventTargetCreated,
 };
 use chromiumoxide::cdp::js_protocol::runtime::{
-    EnableParams as RuntimeEnableParams, EventConsoleApiCalled, EventExceptionThrown,
-    EventExecutionContextCreated,
+    EnableParams as RuntimeEnableParams, EventBindingCalled, EventConsoleApiCalled,
+    EventExceptionThrown, EventExecutionContextCreated,
 };
 use chromiumoxide::cdp::{Event as CdpEvent, IntoEventKind};
 use chromiumoxide::listeners::EventListenerRequest;
@@ -64,6 +64,10 @@ pub(crate) struct PageExt {
     /// Requests linked to their redirect (cycles broken on close).
     pub(crate) redirects: Mutex<Vec<Weak<crate::network::RequestInner>>>,
     initialized: AtomicBool,
+    /// `expose_function` / `expose_binding` of the page.
+    pub(crate) bindings: crate::binding::Bindings,
+    /// `route_web_socket` handlers of the page.
+    pub(crate) ws_routes: crate::web_socket_route::WsRoutes,
 }
 
 impl Default for PageExt {
@@ -82,6 +86,8 @@ impl Default for PageExt {
             file_chooser_intercepted: AtomicBool::new(false),
             redirects: Mutex::new(Vec::new()),
             initialized: AtomicBool::new(false),
+            bindings: Default::default(),
+            ws_routes: Default::default(),
         }
     }
 }
@@ -123,6 +129,7 @@ pub(crate) async fn subscribe(
     one::<EventExceptionThrown>(cdp, tx).await?;
     one::<EventExecutionContextCreated>(cdp, tx).await?;
     one::<EventAttachedToTarget>(cdp, tx).await?;
+    one::<EventBindingCalled>(cdp, tx).await?;
     Ok(())
 }
 
@@ -168,6 +175,7 @@ pub(crate) fn handle_event(page: &PageInner, any: AnyArc) {
         EventExceptionThrown => |p: &PageInner, ev: Arc<EventExceptionThrown>| crate::console::on_exception(p, &ev),
         EventExecutionContextCreated => |p: &PageInner, ev: Arc<EventExecutionContextCreated>| crate::console::on_context_created(p, &ev),
         EventAttachedToTarget => |p: &PageInner, ev: Arc<EventAttachedToTarget>| worker::on_attached(p, &ev),
+        EventBindingCalled => |p: &PageInner, ev: Arc<EventBindingCalled>| crate::binding::on_binding_called(p, &ev),
         EventDetachedFromTarget => |p: &PageInner, ev: Arc<EventDetachedFromTarget>| worker::on_detached(p, ev.session_id.as_ref()),
     );
 }
@@ -250,8 +258,10 @@ async fn configure_child_session(
 ) {
     NetworkManager::add_session(page, session.clone()).await;
     if console {
-        let _ = network_manager::send(page, Some(session), RuntimeEnableParams::default()).await;
+        let _ = network_manager::send(page, Some(session.clone()), RuntimeEnableParams::default())
+            .await;
     }
+    crate::binding::on_child_session(page, session).await;
 }
 
 /// Turn the frame tree notifications into public events.
@@ -289,6 +299,7 @@ async fn forward_page_events(
                 if let Some(frame) = page.frame_by_id(&nav.frame_id) {
                     if nav.new_document.is_some() {
                         watch_session(&page, &frame);
+                        crate::binding::on_new_document(&page, &frame);
                     }
                     page.ext.listeners.emit(Event::FrameNavigated(frame));
                 }
@@ -353,6 +364,7 @@ fn watch_session(page: &Arc<PageInner>, frame: &Frame) {
 
 /// Adopt popups (targets with an opener) into the opener's context.
 pub(crate) async fn start_target_listener(inner: &Arc<BrowserInner>, cdp: &chromiumoxide::Browser) {
+    crate::service_worker::start_listener(inner, cdp).await;
     let Ok(mut created) = cdp.event_listener::<EventTargetCreated>().await else {
         return;
     };

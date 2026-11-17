@@ -171,6 +171,19 @@ impl BrowserInner {
         Ok(browser.new_page(params).await?)
     }
 
+    /// The default context (if any) and the created contexts.
+    pub(crate) fn all_contexts(&self) -> Vec<BrowserContext> {
+        let mut out: Vec<_> = self
+            .default_context
+            .lock()
+            .unwrap()
+            .iter()
+            .cloned()
+            .collect();
+        out.extend(self.contexts.lock().unwrap().iter().cloned());
+        out
+    }
+
     pub(crate) fn remember_page(&self, page: &Page) {
         self.pages.lock().unwrap().insert(
             page.inner.cdp.target_id().as_ref().to_string(),

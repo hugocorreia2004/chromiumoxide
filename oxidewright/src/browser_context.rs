@@ -242,6 +242,8 @@ impl BrowserContext {
         let page = Page::from_inner(inner);
         crate::emulation::init_page(&page).await?;
         crate::screencast::on_page_created(&page).await?;
+        crate::binding::init_page(&page, self).await?;
+        crate::credentials::init_page(&page, self).await?;
         let scripts = self.inner.init_scripts.lock().unwrap().clone();
         for script in scripts {
             page.inner.add_init_script_source(script).await?;

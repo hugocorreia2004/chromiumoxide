@@ -1286,3 +1286,112 @@ impl BrowserContext {
         }
     }
 }
+
+// ----------------------------------------------------------------------
+// tracing.start_har / stop_har
+// ----------------------------------------------------------------------
+
+impl crate::trace::Tracing {
+    /// Start recording the context's traffic into a HAR file at `path`
+    /// (Playwright 1.65's `tracing.startHar`); [`crate::Tracing::stop_har`]
+    /// writes it. Options: `.content(..)` (default embed), `.mode(..)`
+    /// (default full) and `.url_filter(..)`.
+    pub fn start_har(&self, path: impl Into<PathBuf>) -> StartHar {
+        StartHar {
+            context: self.context.clone(),
+            options: RecordHar::new(path),
+        }
+    }
+
+    /// Stop the recording started with [`crate::Tracing::start_har`] and
+    /// write the HAR file.
+    pub async fn stop_har(&self) -> Result<()> {
+        async {
+            let recorder = self.context.inner.ext.tracing_har.lock().unwrap().take();
+            let Some(recorder) = recorder else {
+                return Err(Error::invalid_argument(
+                    "HAR recording has not been started",
+                ));
+            };
+            for page in self.context.pages() {
+                page.inner.sync();
+            }
+            let result = recorder.flush().await;
+            self.context
+                .inner
+                .ext
+                .har_recorders
+                .lock()
+                .unwrap()
+                .retain(|r| !Arc::ptr_eq(r, &recorder));
+            result
+        }
+        .await
+        .map_err(|e| e.with_api("tracing.stopHar"))
+    }
+}
+
+/// Builder returned by [`crate::Tracing::start_har`]; `.await` it.
+#[must_use = "builders do nothing unless awaited"]
+pub struct StartHar {
+    context: BrowserContext,
+    options: RecordHar,
+}
+
+impl StartHar {
+    /// Body storage (default [`HarContentPolicy::Embed`]).
+    pub fn content(mut self, content: HarContentPolicy) -> Self {
+        self.options.content = content;
+        self
+    }
+
+    /// Detail level (default [`HarMode::Full`]).
+    pub fn mode(mut self, mode: HarMode) -> Self {
+        self.options.mode = mode;
+        self
+    }
+
+    /// Only record requests whose URL matches.
+    pub fn url_filter(mut self, url: impl Into<UrlMatch>) -> Self {
+        self.options.url_filter = Some(url.into());
+        self
+    }
+}
+
+impl std::future::IntoFuture for StartHar {
+    type Output = Result<()>;
+    type IntoFuture = std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send>>;
+    fn into_future(self) -> Self::IntoFuture {
+        Box::pin(async move {
+            let context = self.context;
+            let run = || -> Result<()> {
+                let mut slot = context.inner.ext.tracing_har.lock().unwrap();
+                if slot.is_some() {
+                    return Err(Error::invalid_argument(
+                        "HAR recording has already been started",
+                    ));
+                }
+                let version = context
+                    .browser()
+                    .map(|b| b.version().to_string())
+                    .unwrap_or_default();
+                let recorder = Arc::new(HarRecorder::new(
+                    self.options,
+                    context.inner.options.base_url.clone(),
+                    None,
+                    version,
+                )?);
+                context
+                    .inner
+                    .ext
+                    .har_recorders
+                    .lock()
+                    .unwrap()
+                    .push(recorder.clone());
+                *slot = Some(recorder);
+                Ok(())
+            };
+            run().map_err(|e| e.with_api("tracing.startHar"))
+        })
+    }
+}
