@@ -271,9 +271,10 @@ impl NetworkManager {
             || context
                 .as_ref()
                 .is_some_and(|c| !c.ext.routes.lock().unwrap().is_empty());
-        let credentials = context
-            .as_ref()
-            .is_some_and(|c| c.ext.http_credentials.lock().unwrap().is_some());
+        let credentials = context.as_ref().is_some_and(|c| {
+            c.ext.http_credentials.lock().unwrap().is_some()
+                || crate::proxy::context_credentials(c).is_some()
+        });
         let enabled = user || credentials;
         {
             let mut state = nm.state.lock().unwrap();
@@ -1047,18 +1048,21 @@ pub(crate) fn on_loading_failed(page: &PageInner, ev: &EventLoadingFailed) {
 }
 
 pub(crate) fn on_auth_required(page: &PageInner, ev: &EventAuthRequired) {
-    let credentials = page
-        .context
-        .upgrade()
-        .and_then(|c| c.ext.http_credentials.lock().unwrap().clone());
+    let context = page.context.upgrade();
     let is_proxy = matches!(
         ev.auth_challenge.source,
         Some(chromiumoxide::cdp::browser_protocol::fetch::AuthChallengeSource::Proxy)
     );
+    // Proxy credentials only answer the proxy's challenge, never the website's.
     let credentials = if is_proxy {
-        None
+        context
+            .as_ref()
+            .and_then(|c| crate::proxy::context_credentials(c))
     } else {
-        credentials.filter(|c| c.matches(&ev.request.url))
+        context
+            .as_ref()
+            .and_then(|c| c.ext.http_credentials.lock().unwrap().clone())
+            .filter(|c| c.matches(&ev.request.url))
     };
     let key = format!(
         "{}:{}",

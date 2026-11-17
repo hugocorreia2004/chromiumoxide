@@ -46,6 +46,8 @@ pub(crate) struct BrowserInner {
 #[derive(Default)]
 pub(crate) struct BrowserExt {
     pub(crate) downloads: crate::download::BrowserDownloads,
+    /// The launch proxy (its credentials answer contexts without their own).
+    pub(crate) proxy: Mutex<Option<crate::ProxySettings>>,
 }
 
 impl fmt::Debug for Browser {
@@ -229,6 +231,14 @@ impl BrowserInner {
         }
         let mut params = CreateBrowserContextParams::default();
         params.dispose_on_detach = Some(true);
+        let mut options = options;
+        if let Some(proxy) = &options.proxy {
+            let proxy = crate::proxy::normalize(proxy)?;
+            let (server, bypass) = crate::proxy::context_params(&proxy);
+            params.proxy_server = Some(server);
+            params.proxy_bypass_list = bypass;
+            options.proxy = Some(proxy);
+        }
         let id = self
             .execute_with_session(params, None)
             .await?
