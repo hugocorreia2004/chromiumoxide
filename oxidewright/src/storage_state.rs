@@ -236,14 +236,18 @@ impl BrowserContext {
         origins
     }
 
-    pub(crate) async fn collect_storage_state(&self, indexed_db: bool) -> Result<StorageState> {
+    pub(crate) async fn collect_storage_state(
+        &self,
+        indexed_db: bool,
+        opfs: bool,
+    ) -> Result<StorageState> {
         let mut result = StorageState {
             cookies: self.get_cookies(&[]).await?,
             origins: Vec::new(),
         };
         let mut to_save = self.visited_origins();
         let collect = storage_script(&format!(
-            "script.collect({{ indexedDB: {indexed_db}, opfs: false }})"
+            "script.collect({{ indexedDB: {indexed_db}, opfs: {opfs} }})"
         ));
         // First try collecting from the existing pages.
         for page in self.pages() {
@@ -297,6 +301,7 @@ impl BrowserContext {
             context: self.clone(),
             path: None,
             indexed_db: false,
+            opfs: false,
         }
     }
 
@@ -376,9 +381,16 @@ pub struct StorageStateBuilder {
     context: BrowserContext,
     path: Option<PathBuf>,
     indexed_db: bool,
+    opfs: bool,
 }
 
 impl StorageStateBuilder {
+    /// Include the origin private file system (OPFS) of each origin.
+    pub fn opfs(mut self, opfs: bool) -> Self {
+        self.opfs = opfs;
+        self
+    }
+
     /// Also write the state as JSON to this file.
     pub fn path(mut self, path: impl Into<PathBuf>) -> Self {
         self.path = Some(path.into());
@@ -398,7 +410,10 @@ impl IntoFuture for StorageStateBuilder {
     fn into_future(self) -> Self::IntoFuture {
         Box::pin(async move {
             async {
-                let state = self.context.collect_storage_state(self.indexed_db).await?;
+                let state = self
+                    .context
+                    .collect_storage_state(self.indexed_db, self.opfs)
+                    .await?;
                 if let Some(path) = &self.path {
                     write_json(path, &state).await?;
                 }

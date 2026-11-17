@@ -654,6 +654,7 @@ impl APIRequestContext {
             context: self.clone(),
             path: None,
             indexed_db: false,
+            opfs: false,
         }
     }
 
@@ -787,6 +788,7 @@ pub struct RequestStorageState {
     context: APIRequestContext,
     path: Option<PathBuf>,
     indexed_db: bool,
+    opfs: bool,
 }
 
 impl RequestStorageState {
@@ -799,6 +801,12 @@ impl RequestStorageState {
     /// Include IndexedDB databases.
     pub fn indexed_db(mut self, indexed_db: bool) -> Self {
         self.indexed_db = indexed_db;
+        self
+    }
+
+    /// Include the origin private file system (OPFS) entries.
+    pub fn opfs(mut self, opfs: bool) -> Self {
+        self.opfs = opfs;
         self
     }
 }
@@ -820,7 +828,7 @@ impl IntoFuture for RequestStorageState {
                                 } else {
                                     Vec::new()
                                 }),
-                                opfs: None,
+                                opfs: if self.opfs { o.opfs.clone() } else { None },
                                 ..o.clone()
                             })
                             .collect(),
@@ -830,7 +838,9 @@ impl IntoFuture for RequestStorageState {
                             .context
                             .browser_context()?
                             .ok_or_else(Error::target_closed)?;
-                        context.collect_storage_state(self.indexed_db).await?
+                        context
+                            .collect_storage_state(self.indexed_db, self.opfs)
+                            .await?
                     }
                 };
                 if let Some(path) = &self.path {

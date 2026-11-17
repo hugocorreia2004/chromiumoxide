@@ -51,6 +51,8 @@ pub struct ToHaveScreenshot {
     scale: ScreenshotScale,
     mask: Vec<Mask>,
     mask_color: Option<String>,
+    clip: Option<crate::screenshot::Rect>,
+    style_paths: Vec<PathBuf>,
 }
 
 impl ToHaveScreenshot {
@@ -70,6 +72,8 @@ impl ToHaveScreenshot {
             scale: ScreenshotScale::Css,
             mask: Vec::new(),
             mask_color: None,
+            clip: None,
+            style_paths: Vec::new(),
         }
     }
 
@@ -134,7 +138,37 @@ impl ToHaveScreenshot {
         self
     }
 
+    /// Only compare this area of the page (pages only, CSS pixels).
+    pub fn clip(mut self, clip: crate::screenshot::Rect) -> Self {
+        self.clip = Some(clip);
+        self
+    }
+
+    /// Stylesheet files applied while taking the screenshot (Playwright's
+    /// `stylePath`, e.g. to hide dynamic content).
+    pub fn style_path<I, P>(mut self, paths: I) -> Self
+    where
+        I: IntoIterator<Item = P>,
+        P: Into<PathBuf>,
+    {
+        self.style_paths = paths.into_iter().map(Into::into).collect();
+        self
+    }
+
     async fn capture(&self, timeout: u64) -> Result<Vec<u8>> {
+        let mut style = Vec::new();
+        for path in &self.style_paths {
+            let text = tokio::fs::read_to_string(path).await.map_err(|e| {
+                Error::invalid_argument(format!("Failed to read {}: {e}", path.display()))
+            })?;
+            style.push(text.trim().to_string());
+        }
+        let style = (!style.is_empty()).then(|| {
+            style.join(
+                "
+",
+            )
+        });
         macro_rules! apply {
             ($b:expr) => {{
                 let mut b = $b
@@ -147,11 +181,20 @@ impl ToHaveScreenshot {
                 if let Some(color) = &self.mask_color {
                     b = b.mask_color(color.clone());
                 }
+                if let Some(css) = &style {
+                    b = b.style(css.clone());
+                }
                 b
             }};
         }
         match &self.shot {
-            Shot::Page(p) => apply!(p.screenshot().full_page(self.full_page)).await,
+            Shot::Page(p) => {
+                let mut shot = p.screenshot().full_page(self.full_page);
+                if let Some(clip) = self.clip {
+                    shot = shot.clip(clip);
+                }
+                apply!(shot).await
+            }
             Shot::Locator(l) => apply!(l.screenshot()).await,
         }
     }
