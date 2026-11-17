@@ -147,6 +147,8 @@ impl PageBinding {
 #[derive(Default)]
 pub(crate) struct Bindings {
     map: Mutex<HashMap<String, Arc<PageBinding>>>,
+    /// `Runtime.bindingCalled` events of a page, handled in order.
+    queue: std::sync::OnceLock<tokio::sync::mpsc::UnboundedSender<(String, String, i64)>>,
 }
 
 impl Bindings {
@@ -589,12 +591,25 @@ pub(crate) fn on_binding_called(page: &PageInner, event: &EventBindingCalled) {
     let Some(page) = page.self_weak.upgrade() else {
         return;
     };
-    let name = event.name.clone();
-    let payload = event.payload.clone();
-    let context_id = *event.execution_context_id.inner();
-    tokio::spawn(async move {
-        dispatch(page, name, payload, context_id).await;
+    let call = (
+        event.name.clone(),
+        event.payload.clone(),
+        *event.execution_context_id.inner(),
+    );
+    let queue = page.ext.bindings.queue.get_or_init(|| {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<(String, String, i64)>();
+        let weak = Arc::downgrade(&page);
+        tokio::spawn(async move {
+            while let Some((name, payload, context_id)) = rx.recv().await {
+                let Some(page) = weak.upgrade() else {
+                    break;
+                };
+                dispatch(page, name, payload, context_id).await;
+            }
+        });
+        tx
     });
+    let _ = queue.send(call);
 }
 
 /// The frame whose main world has `context_id`.
@@ -645,7 +660,7 @@ async fn dispatch(page: Arc<PageInner>, name: String, payload: String, context_i
         // Last resort fallback (Patchright): the main frame.
         None => page.main_frame(),
     };
-    let result: WireResult = async {
+    let result: std::result::Result<BoxFuture<WireResult>, BindingError> = async {
         let binding = find_binding(&page, &payload_name).ok_or_else(|| {
             BindingError::new(format!("Function \"{payload_name}\" is not exposed"))
         })?;
@@ -660,10 +675,18 @@ async fn dispatch(page: Arc<PageInner>, name: String, payload: String, context_i
             page: Page::from_inner(page.clone()),
             frame: frame.clone(),
         };
-        (binding.callback)(source, args).await
+        Ok((binding.callback)(source, args))
     }
     .await;
-    deliver(&frame, &payload_name, seq, result).await;
+    // Calls start in page order; their results are awaited and delivered
+    // concurrently (a callback may wait for another call).
+    tokio::spawn(async move {
+        let result = match result {
+            Ok(future) => future.await,
+            Err(error) => Err(error),
+        };
+        deliver(&frame, &payload_name, seq, result).await;
+    });
 }
 
 async fn deliver(frame: &Frame, name: &str, seq: Value, result: WireResult) {

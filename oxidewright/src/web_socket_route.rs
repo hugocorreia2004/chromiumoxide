@@ -464,13 +464,11 @@ async fn install(target: &Target) -> Result<()> {
                 &context,
                 BINDING_NAME.to_string(),
                 crate::binding::erase(move |source: BindingSource, args: Vec<JsValue>| {
-                    let weak = weak.clone();
-                    async move {
-                        if let Some(inner) = weak.upgrade() {
-                            on_binding(BrowserContext { inner }, source, args);
-                        }
-                        Ok::<_, BindingError>(())
+                    // Handled synchronously: calls are started in page order.
+                    if let Some(inner) = weak.upgrade() {
+                        on_binding(BrowserContext { inner }, source, args);
                     }
+                    async move { Ok::<_, BindingError>(()) }
                 }),
             )
             .await?;
