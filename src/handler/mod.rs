@@ -395,14 +395,31 @@ impl Handler {
                             let results = targets.clone();
                             for target_info in targets {
                                 let target_id = target_info.target_id.clone();
+                                // A known target is already attached (or attaching):
+                                // recreating it would start a second attach whose
+                                // session could replace the working one.
+                                if self.targets.contains_key(&target_id) {
+                                    continue;
+                                }
+                                let is_page = target_info.r#type == "page";
                                 let event: EventTargetCreated = EventTargetCreated { target_info };
                                 self.on_target_created(event);
-                                let attach = AttachToTargetParams::new(target_id);
-                                let _ = self.conn.submit_command(
-                                    attach.identifier(),
-                                    None,
-                                    serde_json::to_value(attach).unwrap(),
-                                );
+                                // Pages attach themselves (flattened) when polled.
+                                // Other targets get a flattened session too: a
+                                // non-flattened one cannot receive commands, and a
+                                // page given one never finished initializing.
+                                if !is_page {
+                                    let attach = AttachToTargetParams::builder()
+                                        .target_id(target_id)
+                                        .flatten(true)
+                                        .build()
+                                        .unwrap();
+                                    let _ = self.conn.submit_command(
+                                        attach.identifier(),
+                                        None,
+                                        serde_json::to_value(attach).unwrap(),
+                                    );
+                                }
                             }
 
                             let _ = tx.send(Ok(results)).ok();
