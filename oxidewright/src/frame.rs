@@ -219,6 +219,12 @@ impl Frame {
         self.inner.detached.load(Ordering::SeqCst)
     }
 
+    /// The detached flag without syncing events first: safe to call while
+    /// holding page locks (`is_detached()` is not).
+    pub(crate) fn detached_flag(&self) -> bool {
+        self.inner.detached.load(Ordering::SeqCst)
+    }
+
     /// Whether the given lifecycle state was reached for the current document.
     pub fn has_load_state(&self, state: LoadState) -> bool {
         self.sync();
@@ -677,6 +683,11 @@ impl Frame {
         progress.log(format!(
             "navigating to \"{url}\", waiting until \"{wait_until}\""
         ));
+        // Apply events already received before subscribing: a lagging pump
+        // would otherwise replay an earlier commit (e.g. the navigation this
+        // one replaces) as if it interrupted ours. Playwright only listens
+        // after `Page.navigate` returns, so it never sees those.
+        page.sync();
         let mut rx = page.subscribe();
         let frame_id = self.inner.id.clone();
         let mut detach_rx = page.subscribe();
@@ -709,11 +720,39 @@ impl Frame {
             return Err(Error::navigation("Download is starting"));
         }
         if let Some(error_text) = result.error_text.filter(|e| !e.is_empty()) {
+            // Closing the page aborts its navigation, and Chrome may answer
+            // `Page.navigate` with ERR_ABORTED before the close is seen.
+            if Self::closed_soon(&page).await {
+                return Err(Error::target_closed());
+            }
             return Err(Error::navigation(format!("{error_text} at {url}")));
         }
         let new_document_id = result.loader_id.map(|l| l.as_ref().to_string());
+        // Commits received before the `Page.navigate` response belong to
+        // earlier navigations (the one this replaces, whose event may still
+        // have been in flight when we subscribed). Playwright only listens
+        // after the response, so drop those instead of reporting them as an
+        // interruption; every other queued event is kept.
+        page.sync();
+        let mut queued = std::collections::VecDeque::new();
+        while let Ok(event) = rx.try_recv() {
+            let stale = match (&event, &new_document_id) {
+                (PageEvent::Navigated(nav), Some(expected)) if nav.frame_id == frame_id => nav
+                    .new_document
+                    .as_ref()
+                    .is_some_and(|doc| doc.document_id.as_deref() != Some(expected.as_str())),
+                _ => false,
+            };
+            if !stale {
+                queued.push_back(event);
+            }
+        }
         let event = loop {
-            let event = page.next_event(&mut rx).await?;
+            let event = match queued.pop_front() {
+                Some(PageEvent::Closed) => return Err(Error::target_closed()),
+                Some(event) => event,
+                None => page.next_event(&mut rx).await?,
+            };
             match event {
                 PageEvent::FrameDetached(id) if id == frame_id => {
                     return Err(Error::frame_detached("Frame was detached"));
@@ -750,6 +789,17 @@ impl Frame {
         self.wait_for_lifecycle(&page, &mut rx, wait_until, None)
             .await?;
         Ok(event.response())
+    }
+
+    /// Whether the page gets closed within a short grace period.
+    async fn closed_soon(page: &PageInner) -> bool {
+        for _ in 0..10 {
+            if page.is_closed() {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        page.is_closed()
     }
 
     /// Whether the frame gets detached within a short grace period (a failed

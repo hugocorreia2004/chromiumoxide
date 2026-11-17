@@ -723,7 +723,10 @@ impl PageInner {
         let Some(data) = state.frames.get_mut(id) else {
             return;
         };
-        if data.lifecycle.contains(&LoadState::NetworkIdle) || data.frame.is_detached() {
+        // Read the flag directly: `Frame::is_detached()` calls `sync()`, which
+        // takes the `events` lock while we hold `tree`, the reverse of the
+        // pump's order (and a re-entrant `tree` lock if it drains an event).
+        if data.lifecycle.contains(&LoadState::NetworkIdle) || data.frame.detached_flag() {
             return;
         }
         let generation = self.timer_seq.fetch_add(1, Ordering::SeqCst) + 1;
