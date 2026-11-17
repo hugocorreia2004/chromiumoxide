@@ -188,6 +188,9 @@ pub(crate) fn did_close(page: &PageInner) {
     if let Some(inner) = page.self_weak.upgrade() {
         let page = Page::from_inner(inner);
         page.inner.ext.listeners.emit(Event::Close(page.clone()));
+        if let Some(context) = page.inner.context.upgrade() {
+            context.ext.listeners.emit(Event::PageClose(page.clone()));
+        }
     }
 }
 
@@ -290,7 +293,7 @@ async fn forward_page_events(
                     if nav.new_document.is_some() {
                         watch_session(&page, &frame);
                     }
-                    page.ext.listeners.emit(Event::FrameNavigated(frame));
+                    emit_frame(&page, Event::FrameNavigated(frame));
                 }
             }
             PageEvent::Lifecycle(id, state) => {
@@ -303,6 +306,7 @@ async fn forward_page_events(
                     LoadState::Load => {
                         page.ext.listeners.emit(Event::Load(p.clone()));
                         if let Some(context) = page.context.upgrade() {
+                            context.ext.listeners.emit(Event::PageLoad(p.clone()));
                             context.ext.har_page_event(&p, true);
                         }
                     }

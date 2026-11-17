@@ -93,6 +93,16 @@ impl Browser {
         url: impl Into<String>,
         config: HandlerConfig,
     ) -> Result<(Self, Handler)> {
+        Self::connect_with_headers(url, config, Vec::new()).await
+    }
+
+    /// Like [`Browser::connect_with_config`], sending extra HTTP headers with
+    /// the `json/version` request and the websocket handshake.
+    pub async fn connect_with_headers(
+        url: impl Into<String>,
+        config: HandlerConfig,
+        headers: Vec<(String, String)>,
+    ) -> Result<(Self, Handler)> {
         let mut debug_ws_url = url.into();
 
         if debug_ws_url.starts_with("http") {
@@ -111,6 +121,18 @@ impl Browser {
                     },
                 )
                 .header("content-type", "application/json")
+                .headers({
+                    let mut map = reqwest::header::HeaderMap::new();
+                    for (name, value) in &headers {
+                        if let (Ok(name), Ok(value)) = (
+                            reqwest::header::HeaderName::from_bytes(name.as_bytes()),
+                            reqwest::header::HeaderValue::from_str(value),
+                        ) {
+                            map.append(name, value);
+                        }
+                    }
+                    map
+                })
                 .send()
                 .await
             {
@@ -131,7 +153,8 @@ impl Browser {
             }
         }
 
-        let conn = Connection::<CdpEventMessage>::connect(&debug_ws_url).await?;
+        let conn =
+            Connection::<CdpEventMessage>::connect_with_headers(&debug_ws_url, &headers).await?;
 
         let (tx, rx) = channel(1);
 

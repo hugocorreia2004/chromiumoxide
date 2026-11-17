@@ -3,6 +3,7 @@
 
 mod actions_smoke;
 mod browser;
+mod browser_api;
 mod browsercontext_fetch;
 mod clicks;
 mod common;

@@ -189,22 +189,25 @@ are omitted unless they illustrate the builder.
 
 | Playwright | oxidewright | Notes |
 |---|---|---|
-| `browser.removeAllListeners()` | missing | use `remove_listener(id)` per handler |
-| `browser.on()` | missing | no browser events |
-| `browser.once()` | missing | no browser events |
-| `browser.removeListener()` | missing | no browser events |
+| `browser.removeAllListeners()` | `browser.remove_all_listeners(None)` | or `Some(EventKind::Context)` |
+| `browser.on()` | `browser.on(EventKind::Disconnected, \|event\| ..)` | typed: `on_context`, `on_disconnected` |
+| `browser.once()` | `browser.once(EventKind::Context, \|event\| ..)` |  |
+| `browser.removeListener()` | `browser.remove_listener(id)` |  |
 | `browser.bind()` | missing | not implemented yet |
-| `browser.browserType()` | missing | not implemented yet |
-| `browser.close()` | `browser.close().await` |  |
+| `browser.browserType()` | `browser.browser_type()` |  |
+| `browser.close()` | `browser.close().reason("done").await` | every context closes too (`close` events, `close_reason`) |
 | `browser.contexts()` | `browser.contexts()` |  |
 | `browser.isConnected()` | `browser.is_connected()` |  |
 | `browser.newBrowserCDPSession()` | `browser.new_browser_cdp_session().await` |  |
 | `browser.newContext()` | `browser.new_context().locale("en-US").await` | every context option is a builder method |
-| `browser.newPage()` | `browser.new_page().await` |  |
+| `browser.newPage()` | `browser.new_page().locale("de-DE").await` | every context option; the page owns its context (closing the page closes it, `context.new_page()` fails) |
 | `browser.startTracing()` | missing | not implemented yet |
 | `browser.stopTracing()` | missing | not implemented yet |
 | `browser.unbind()` | missing | not implemented yet |
 | `browser.version()` | `browser.version()` |  |
+
+Events: `context` (`Event::Context`) and `disconnected` (`Event::Disconnected`, also after
+`close()`); `browser.wait_for_event(kind)`, `wait_for_context()`.
 
 Also: `with_cdp`.
 
@@ -212,13 +215,23 @@ Also: `with_cdp`.
 
 | Playwright | oxidewright | Notes |
 |---|---|---|
-| `chromium.connectOverCDP()` | `chromium().connect_over_cdp(endpoint).await` |  |
+| `chromium.connectOverCDP()` | `chromium().connect_over_cdp(endpoint).headers(h).slow_mo(100).await` | `timeout`, `headers`, `slow_mo`, `no_defaults` (keeps the default context's download behavior), `is_local` (accepted, no effect); `artifactsDir` is not supported |
 | `chromium.connect()` | missing | Playwright server protocol; use `connect_over_cdp` |
-| `chromium.executablePath()` | missing | not implemented yet |
-| `chromium.launch()` | `chromium().launch().headless(true).await` |  |
-| `chromium.launchPersistentContext()` | missing | use `launch().user_data_dir(dir)` |
+| `chromium.executablePath()` | `chromium().executable_path()?` | the detected Chrome/Chromium/Edge (no bundled browser) |
+| `chromium.launch()` | `chromium().launch().headless(true).await` | see the options below |
+| `chromium.launchPersistentContext()` | `chromium().launch_persistent_context(dir).locale("de-DE").await` | every launch and context option; returns the default context; closing it closes the browser |
 | `chromium.launchServer()` | missing | not implemented yet |
 | `chromium.name()` | `chromium().name()` |  |
+
+Launch options: `headless`, `executable_path`, `channel` (`chrome`, `chrome-beta`, `chrome-dev`,
+`chrome-canary`, `msedge`, `msedge-beta`, `msedge-dev`, `msedge-canary`, found in their standard
+install locations like Playwright's registry), `args`, `ignore_default_args(true)` or
+`ignore_default_args(["--mute-audio"])`, `chromium_sandbox`, `timeout`, `env`, `proxy`, `slow_mo`
+(input actions, navigations and history calls, like Playwright), `downloads_path`; `traces_dir` and
+`handle_sigint`/`handle_sigterm`/`handle_sighup` are accepted for compatibility but have no effect
+(traces are kept in memory; no signal handler is installed, the browser process is killed when the
+`Browser` is closed or dropped). `artifactsDir` and `logger` are not supported. The extra
+`user_data_dir` option of `launch()` still exists (Playwright rejects it there).
 
 ### BrowserContext
 
@@ -226,7 +239,7 @@ Also: `with_cdp`.
 |---|---|---|
 | `context.exposeBinding()` | missing | not implemented: `Runtime.addBinding` is visible to pages |
 | `context.addInitScript()` | `context.add_init_script(script).await` |  |
-| `context.removeAllListeners()` | missing | use `remove_listener(id)` per handler |
+| `context.removeAllListeners()` | `context.remove_all_listeners(None)` | or `Some(EventKind::Page)` |
 | `context.on()` | `context.on(EventKind::Page, \|event\| ..)` | or typed: `context.on_page(\|p\| ..)` |
 | `context.once()` | `context.once(EventKind::Page, \|event\| ..)` |  |
 | `context.removeListener()` | `context.remove_listener(id)` |  |
@@ -262,9 +275,9 @@ Also: `with_cdp`.
 | `context.clock` | `context.clock()` |  |
 | `context.request` | `context.request()` |  |
 
-Typed event handlers: `on_page`, `on_console`, `on_dialog`, `on_web_error`, `on_request`, `on_request_failed`, `on_request_finished`, `on_response`, `on_download`, `on_frame_attached`, `on_close`.
+Typed event handlers: `on_page`, `on_console`, `on_dialog`, `on_dialog_closed`, `on_web_error`, `on_request`, `on_request_failed`, `on_request_finished`, `on_response`, `on_download`, `on_frame_attached`, `on_frame_detached`, `on_frame_navigated`, `on_page_close`, `on_page_load`, `on_close`.
 
-Also: `wait_for_page`, `wait_for_request`, `wait_for_response`, `wait_for_console_message`, `wait_for_dialog`, `wait_for_close`, `expect_event`, `expect_page`, `expect_console_message`, `close_reason`.
+Also: `wait_for_page`, `wait_for_request`, `wait_for_response`, `wait_for_console_message`, `wait_for_dialog`, `wait_for_dialog_closed`, `wait_for_close`, `expect_event`, `expect_page`, `expect_console_message`, `close_reason`.
 
 ### Page
 
@@ -382,7 +395,7 @@ Also: `wait_for_page`, `wait_for_request`, `wait_for_response`, `wait_for_consol
 | `page.request` | `page.request()` |  |
 | `page.coverage` | `page.start_js_coverage().await` | `stop_js_coverage`, `start_css_coverage`, `stop_css_coverage` are on the page; not stealthy |
 
-Typed event handlers: `on_close`, `on_console`, `on_crash`, `on_dialog`, `on_dom_content_loaded`, `on_download`, `on_file_chooser`, `on_frame_attached`, `on_frame_detached`, `on_frame_navigated`, `on_load`, `on_page_error`, `on_popup`, `on_request`, `on_request_failed`, `on_request_finished`, `on_response`, `on_websocket`, `on_worker`.
+Typed event handlers: `on_close`, `on_console`, `on_crash`, `on_dialog`, `on_dialog_closed`, `on_dom_content_loaded`, `on_download`, `on_file_chooser`, `on_frame_attached`, `on_frame_detached`, `on_frame_navigated`, `on_load`, `on_page_error`, `on_popup`, `on_request`, `on_request_failed`, `on_request_finished`, `on_response`, `on_websocket`, `on_worker`.
 
 Also: `type_text`, `stop_js_coverage`, `start_css_coverage`, `stop_css_coverage`, `locator_with`, `get_by_alt_text_with`, `get_by_label_with`, `get_by_placeholder_with`, `get_by_text_with`, `get_by_title_with`, `get_by_role_with`, `frame_locator_any`, `cdp`, `frame_by_url`, `add_init_script_path`, `wait_for_popup`, `wait_for_download`, `wait_for_file_chooser`, `wait_for_dialog`, `wait_for_console_message`, `wait_for_page_error`, `wait_for_request_finished`, `wait_for_request_failed`, `wait_for_websocket`, `wait_for_worker`, `wait_for_close`, `wait_for_frame_event`, `expect_event`, `expect_popup`, `expect_download`, `expect_file_chooser`, `expect_console_message`, `expect_request`, `expect_response`, `expect_request_finished`, `expect_websocket`, `expect_worker`, `close_reason`.
 

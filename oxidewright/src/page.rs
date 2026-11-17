@@ -1486,7 +1486,8 @@ impl IntoFuture for Reload {
     type Output = Result<Option<crate::Response>>;
     type IntoFuture = BoxFuture<Result<Option<crate::Response>>>;
     fn into_future(self) -> Self::IntoFuture {
-        Box::pin(async move {
+        let slow = self.page.inner.browser.upgrade();
+        Box::pin(crate::browser::with_slow_mo(slow, async move {
             let frame = self.page.main_frame();
             let mut wait = frame.wait_for_navigation().with_api("page.reload");
             if let Some(state) = self.wait_until {
@@ -1504,7 +1505,7 @@ impl IntoFuture for Reload {
                     .with_api("page.reload"));
             }
             wait.await
-        })
+        }))
     }
 }
 
@@ -1535,7 +1536,8 @@ impl IntoFuture for GoHistory {
     type Output = Result<Option<crate::Response>>;
     type IntoFuture = BoxFuture<Result<Option<crate::Response>>>;
     fn into_future(self) -> Self::IntoFuture {
-        Box::pin(async move {
+        let slow = self.page.inner.browser.upgrade();
+        Box::pin(crate::browser::with_slow_mo(slow, async move {
             let api = if self.delta < 0 {
                 "page.goBack"
             } else {
@@ -1568,7 +1570,7 @@ impl IntoFuture for GoHistory {
                 return Err(frame.closed_or(Error::from(e)).await.with_api(api));
             }
             wait.await
-        })
+        }))
     }
 }
 

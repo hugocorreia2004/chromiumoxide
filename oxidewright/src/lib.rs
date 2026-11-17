@@ -155,9 +155,12 @@ pub use actions::{
     SelectOption, SelectOptionAction, SelectValue, SelectValues, SetChecked, SetInputFiles, Tap,
     Type, WaitForSelector, kinds,
 };
-pub use browser::Browser;
-pub use browser_context::{BrowserContext, NewContext, NewContextOptions};
-pub use browser_type::{BrowserType, ConnectOverCdp, Launch, LaunchOptions, chromium};
+pub use browser::{Browser, CloseBrowser};
+pub use browser_context::{BrowserContext, NewContext, NewContextOptions, NewPage};
+pub use browser_type::{
+    BrowserType, ConnectOverCdp, IgnoreDefaultArgs, Launch, LaunchOptions, LaunchPersistentContext,
+    chromium,
+};
 pub use cdp_session::{CDPSession, CdpSessionTarget};
 pub use clock::{Clock, ClockInstall, ClockTicks, ClockTime};
 pub use console::{ConsoleMessage, ConsoleMessageLocation, WebError};

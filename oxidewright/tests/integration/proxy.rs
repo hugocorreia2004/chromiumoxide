@@ -119,22 +119,49 @@ fn pr_004_should_work_with_ip_port_notion() {
     });
 }
 
-#[test]
-fn pr_005_should_proxy_local_network_requests() {
-    run(|t| async move {
-        // Loopback goes through the proxy too unless bypassed: a page on a
-        // port nothing listens on is still served by the proxy.
+/// `PR-005`: loopback goes through the proxy too unless bypassed (a page on
+/// a port nothing listens on is still served by the proxy), with or without
+/// an unrelated bypass rule.
+fn proxy_local_network_requests(target: &'static str, additional_bypass: bool) {
+    run(move |t| async move {
         serve_target(&t.server);
-        let browser = launch(Some(ProxySettings::new(format!(
-            "127.0.0.1:{}",
-            t.server.port
-        ))))
-        .await;
+        let mut proxy = ProxySettings::new(format!("localhost:{}", t.server.port));
+        if additional_bypass {
+            proxy.bypass = Some("1.non.existent.domain.for.the.test".into());
+        }
+        let browser = launch(Some(proxy)).await;
         let page = browser.new_page().await.unwrap();
-        page.goto("http://localhost:1/target.html").await.unwrap();
+        page.goto(format!("http://{target}:55555/target.html"))
+            .await
+            .unwrap();
         assert_eq!(page.title().await.unwrap(), "Served by the proxy");
+        let bypassed = page
+            .goto("http://1.non.existent.domain.for.the.test/target.html")
+            .await
+            .is_err();
+        assert_eq!(bypassed, additional_bypass);
         browser.close().await.unwrap();
     });
+}
+
+#[test]
+fn pr_005_should_proxy_local_network_requests_localhost() {
+    proxy_local_network_requests("localhost", false);
+}
+
+#[test]
+fn pr_005_should_proxy_local_network_requests_localhost_with_bypass() {
+    proxy_local_network_requests("localhost", true);
+}
+
+#[test]
+fn pr_005_should_proxy_local_network_requests_loopback_ip() {
+    proxy_local_network_requests("127.0.0.1", false);
+}
+
+#[test]
+fn pr_005_should_proxy_local_network_requests_loopback_ip_with_bypass() {
+    proxy_local_network_requests("127.0.0.1", true);
 }
 
 #[test]

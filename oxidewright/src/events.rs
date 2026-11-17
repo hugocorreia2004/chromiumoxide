@@ -77,6 +77,18 @@ pub enum Event {
     WebSocket(WebSocket),
     /// A dedicated worker was created (`worker`).
     Worker(Worker),
+    /// A dialog was accepted or dismissed (`dialogclosed`, page and context).
+    DialogClosed(Dialog),
+    /// A page of the context closed (`pageclose` on a context).
+    PageClose(Page),
+    /// The `load` event fired in the main frame of a page of the context
+    /// (`pageload` on a context).
+    PageLoad(Page),
+    /// A context was created (`context` on a browser).
+    Context(BrowserContext),
+    /// The browser closed or the connection was lost (`disconnected` on a
+    /// browser).
+    Disconnected(crate::Browser),
 }
 
 /// The kind of an [`Event`], used to register handlers and waiters.
@@ -123,6 +135,16 @@ pub enum EventKind {
     WebSocket,
     /// `worker`
     Worker,
+    /// `dialogclosed`
+    DialogClosed,
+    /// `pageclose` (context)
+    PageClose,
+    /// `pageload` (context)
+    PageLoad,
+    /// `context` (browser)
+    Context,
+    /// `disconnected` (browser)
+    Disconnected,
 }
 
 impl EventKind {
@@ -149,6 +171,11 @@ impl EventKind {
             EventKind::Response => "response",
             EventKind::WebSocket => "websocket",
             EventKind::Worker => "worker",
+            EventKind::DialogClosed => "dialogclosed",
+            EventKind::PageClose => "pageclose",
+            EventKind::PageLoad => "pageload",
+            EventKind::Context => "context",
+            EventKind::Disconnected => "disconnected",
         }
     }
 }
@@ -183,6 +210,11 @@ impl Event {
             Event::Response(_) => EventKind::Response,
             Event::WebSocket(_) => EventKind::WebSocket,
             Event::Worker(_) => EventKind::Worker,
+            Event::DialogClosed(_) => EventKind::DialogClosed,
+            Event::PageClose(_) => EventKind::PageClose,
+            Event::PageLoad(_) => EventKind::PageLoad,
+            Event::Context(_) => EventKind::Context,
+            Event::Disconnected(_) => EventKind::Disconnected,
         }
     }
 }
@@ -400,11 +432,12 @@ impl Listeners {
     }
 }
 
-/// Something that emits events: a page or a context.
+/// Something that emits events: a page, a context or a browser.
 #[derive(Clone)]
 pub(crate) enum Emitter {
     Page(Page),
     Context(BrowserContext),
+    Browser(crate::Browser),
 }
 
 impl Emitter {
@@ -412,6 +445,7 @@ impl Emitter {
         match self {
             Emitter::Page(page) => &page.inner.ext.listeners,
             Emitter::Context(context) => &context.inner.ext.listeners,
+            Emitter::Browser(browser) => &browser.inner.listeners,
         }
     }
 
@@ -419,6 +453,7 @@ impl Emitter {
         match self {
             Emitter::Page(page) => page.is_closed(),
             Emitter::Context(context) => context.is_closed(),
+            Emitter::Browser(browser) => !browser.is_connected(),
         }
     }
 
@@ -426,6 +461,7 @@ impl Emitter {
         match self {
             Emitter::Page(page) => page.inner.timeouts.clone(),
             Emitter::Context(context) => context.inner.timeouts.clone(),
+            Emitter::Browser(_) => Arc::new(TimeoutSettings::new(None)),
         }
     }
 }
@@ -471,8 +507,14 @@ impl<T: Send + 'static> WaitForEvent<T> {
         map: fn(Event) -> Option<T>,
     ) -> Self {
         let mut kinds = vec![kind];
-        if kind != EventKind::Close {
-            kinds.push(EventKind::Close);
+        // A browser has no `close` event: `disconnected` ends the wait.
+        let end = if matches!(emitter, Emitter::Browser(_)) {
+            EventKind::Disconnected
+        } else {
+            EventKind::Close
+        };
+        if kind != end {
+            kinds.push(end);
         }
         if matches!(emitter, Emitter::Page(_)) && kind != EventKind::Crash {
             kinds.push(EventKind::Crash);
@@ -486,6 +528,7 @@ impl<T: Send + 'static> WaitForEvent<T> {
                     page.inner.sync();
                 }
             }
+            Emitter::Browser(_) => {}
         }
         let waiter = emitter.listeners().add_waiter(kinds);
         WaitForEvent {
@@ -548,7 +591,8 @@ impl<T: Send + 'static> IntoFuture for WaitForEvent<T> {
             let Some((id, mut rx)) = waiter else {
                 return Err(Error::target_closed().with_api(api));
             };
-            let closed_before = emitter.is_closed() && kind != EventKind::Close;
+            let closed_before =
+                emitter.is_closed() && !matches!(kind, EventKind::Close | EventKind::Disconnected);
             let wait = async {
                 if closed_before {
                     return Err(Error::target_closed());
@@ -567,7 +611,9 @@ impl<T: Send + 'static> IntoFuture for WaitForEvent<T> {
                         continue;
                     }
                     match event_kind {
-                        EventKind::Close => return Err(Error::target_closed()),
+                        EventKind::Close | EventKind::Disconnected => {
+                            return Err(Error::target_closed());
+                        }
                         EventKind::Crash => {
                             return Err(Error::target_closed_with("Page crashed"));
                         }
@@ -679,6 +725,18 @@ pub(crate) fn as_worker(e: Event) -> Option<Worker> {
 pub(crate) fn as_frame(e: Event) -> Option<Frame> {
     match e {
         Event::FrameAttached(f) | Event::FrameDetached(f) | Event::FrameNavigated(f) => Some(f),
+        _ => None,
+    }
+}
+pub(crate) fn as_dialog_closed(e: Event) -> Option<Dialog> {
+    match e {
+        Event::DialogClosed(d) => Some(d),
+        _ => None,
+    }
+}
+pub(crate) fn as_context(e: Event) -> Option<BrowserContext> {
+    match e {
+        Event::Context(c) => Some(c),
         _ => None,
     }
 }

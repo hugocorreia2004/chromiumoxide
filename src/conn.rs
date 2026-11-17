@@ -34,15 +34,32 @@ pub struct Connection<T: EventMessage> {
 
 impl<T: EventMessage + Unpin> Connection<T> {
     pub async fn connect(debug_ws_url: impl AsRef<str>) -> Result<Self> {
+        Self::connect_with_headers(debug_ws_url, &[]).await
+    }
+
+    /// Like [`Connection::connect`], sending extra HTTP headers with the
+    /// websocket handshake.
+    pub async fn connect_with_headers(
+        debug_ws_url: impl AsRef<str>,
+        headers: &[(String, String)],
+    ) -> Result<Self> {
+        use async_tungstenite::tungstenite::client::IntoClientRequest;
+        use async_tungstenite::tungstenite::http::{HeaderName, HeaderValue};
+
         let config = WebSocketConfig::default()
             .max_message_size(None)
             .max_frame_size(None);
 
-        let (ws, _) = async_tungstenite::tokio::connect_async_with_config(
-            debug_ws_url.as_ref(),
-            Some(config),
-        )
-        .await?;
+        let mut request = debug_ws_url.as_ref().into_client_request()?;
+        for (name, value) in headers {
+            let name = HeaderName::from_bytes(name.as_bytes())
+                .map_err(|e| CdpError::msg(format!("Invalid header name {name:?}: {e}")))?;
+            let value = HeaderValue::from_str(value)
+                .map_err(|e| CdpError::msg(format!("Invalid header value for {name}: {e}")))?;
+            request.headers_mut().append(name, value);
+        }
+        let (ws, _) =
+            async_tungstenite::tokio::connect_async_with_config(request, Some(config)).await?;
 
         Ok(Self {
             pending_commands: Default::default(),

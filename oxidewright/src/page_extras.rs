@@ -237,6 +237,13 @@ impl IntoFuture for ClosePage {
     type IntoFuture = BoxFuture<Result<()>>;
     fn into_future(self) -> Self::IntoFuture {
         Box::pin(async move {
+            // The page of `browser.new_page()` closes its context.
+            if let Some(context) = crate::BrowserContext::owned_by(&self.page) {
+                if let Some(reason) = &self.reason {
+                    *self.page.inner.emu.close_reason.lock().unwrap() = Some(reason.clone());
+                }
+                return context.close().await;
+            }
             if self.run_before_unload {
                 if self.page.is_closed() {
                     return Err(Error::target_closed().with_api("page.close"));

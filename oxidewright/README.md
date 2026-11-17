@@ -135,7 +135,7 @@ Opt-in features that **are** detectable when you enable them:
 
 | Area | Status |
 |---|---|
-| `chromium().launch()` / `connect_over_cdp()` | Implemented. Missing: `launch_persistent_context` (use `.user_data_dir(..)`), `connect`, `launch_server` |
+| `chromium().launch()` / `connect_over_cdp()` | Implemented, with `launch_persistent_context`. Missing: `connect`, `launch_server` |
 | Browser, BrowserContext, Page, Frame | Implemented (navigation, lifecycle incl. `networkidle`, frames incl. out-of-process iframes, init scripts, tags, `close` with reason) |
 | Locators, `get_by_*`, FrameLocator, filters, strict mode | Implemented |
 | Actions (click, fill, press, check, select, upload, drag, ...) with actionability checks | Implemented |

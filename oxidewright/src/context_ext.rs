@@ -120,8 +120,9 @@ impl NewContext {
 impl BrowserContext {
     /// Call `handler` for every event of `kind` (context events: `page`,
     /// `close`, `request`, `response`, `requestfinished`, `requestfailed`,
-    /// `console`, `dialog`, `pageerror` (`weberror`), `download`,
-    /// `frameattached`, `framedetached`).
+    /// `console`, `dialog`, `dialogclosed`, `pageerror` (`weberror`),
+    /// `download`, `frameattached`, `framedetached`, `framenavigated`,
+    /// `pageclose`, `pageload`).
     pub fn on(
         &self,
         kind: EventKind,
@@ -165,6 +166,19 @@ impl BrowserContext {
         on_download, Download, Download, Download;
         /// `frameattached`.
         on_frame_attached, FrameAttached, FrameAttached, Frame;
+        /// `framedetached`.
+        on_frame_detached, FrameDetached, FrameDetached, Frame;
+        /// `framenavigated`: a frame of a page of the context navigated.
+        on_frame_navigated, FrameNavigated, FrameNavigated, Frame;
+        /// `pageclose`: a page of the context closed.
+        on_page_close, PageClose, PageClose, Page;
+        /// `pageload`: the `load` event fired in a page of the context.
+        on_page_load, PageLoad, PageLoad, Page;
+    }
+
+    /// Remove every handler of `kind` (all kinds when `None`).
+    pub fn remove_all_listeners(&self, kind: Option<EventKind>) {
+        self.inner.ext.listeners.remove_all(kind)
     }
 
     /// `close`: the context closed.

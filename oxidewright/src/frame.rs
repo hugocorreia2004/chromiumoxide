@@ -1081,7 +1081,8 @@ impl IntoFuture for Goto {
     type Output = Result<Option<Response>>;
     type IntoFuture = BoxFuture<Result<Option<Response>>>;
     fn into_future(self) -> Self::IntoFuture {
-        Box::pin(async move {
+        let slow = self.frame.page_inner().and_then(|p| p.browser.upgrade());
+        Box::pin(crate::browser::with_slow_mo(slow, async move {
             let timeout = self.frame.timeout_settings_navigation(self.timeout);
             let progress = Progress::new(self.api, timeout);
             let wait_until = self.wait_until.unwrap_or_default();
@@ -1091,7 +1092,7 @@ impl IntoFuture for Goto {
                         .goto_impl(&progress, self.url, wait_until, self.referer),
                 )
                 .await
-        })
+        }))
     }
 }
 
