@@ -664,6 +664,9 @@ async fn launch_browser(options: LaunchOptions, persistent: bool) -> Result<Brow
     args.extend(options.args.iter().cloned());
     let mut builder = BrowserConfig::builder()
         .disable_default_args()
+        // New pages and popups stay paused until adopted and configured, so
+        // their first document already gets the context's emulation.
+        .wait_for_debugger_on_start()
         .viewport(None)
         .user_data_dir(&profile_dir)
         .request_timeout(Duration::from_secs(600))
@@ -846,7 +849,10 @@ impl IntoFuture for ConnectOverCdp {
             let connect = async {
                 let (cdp, handler) = chromiumoxide::Browser::connect_with_headers(
                     self.endpoint.clone(),
-                    HandlerConfig::default(),
+                    HandlerConfig {
+                        wait_for_debugger_on_start: true,
+                        ..HandlerConfig::default()
+                    },
                     self.headers.clone(),
                 )
                 .await

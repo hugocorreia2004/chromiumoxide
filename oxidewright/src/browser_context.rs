@@ -244,6 +244,29 @@ impl BrowserContext {
         opener: Option<Weak<PageInner>>,
     ) -> Result<Page> {
         let browser = self.browser_inner()?;
+        let target_id = cdp.target_id().as_ref().to_string();
+        if let Some(inner) = browser.page_by_target(&target_id) {
+            return Ok(Page::from_inner(inner));
+        }
+        // `new_page` and the target listener may both adopt the same page:
+        // the first one does it, the other gets the same page.
+        let cell = browser.adoption_cell(&target_id);
+        let result = cell
+            .get_or_try_init(|| self.adopt_page_once(cdp, opener))
+            .await
+            .cloned();
+        browser.finish_adoption(&target_id);
+        result
+    }
+
+    async fn adopt_page_once(
+        &self,
+        cdp: chromiumoxide::Page,
+        opener: Option<Weak<PageInner>>,
+    ) -> Result<Page> {
+        let browser = self.browser_inner()?;
+        let scripts = self.inner.init_scripts.lock().unwrap().clone();
+        let scripts_installed = crate::emulation::preconfigure_new_page(&cdp, self, &scripts).await;
         let inner = PageInner::attach(cdp, Arc::downgrade(&browser), self).await?;
         *inner.ext.opener.lock().unwrap() = opener;
         let page = Page::from_inner(inner);
@@ -251,11 +274,22 @@ impl BrowserContext {
         crate::screencast::on_page_created(&page).await?;
         crate::binding::init_page(&page, self).await?;
         crate::credentials::init_page(&page, self).await?;
-        let scripts = self.inner.init_scripts.lock().unwrap().clone();
-        for script in scripts {
-            page.inner.add_init_script_source(script).await?;
+        if !scripts_installed {
+            for script in scripts {
+                page.inner.add_init_script_source_with(script, true).await?;
+            }
         }
         crate::page_ext::initialize(&page, self).await?;
+        // New pages and popups start paused (`wait_for_debugger_on_start`):
+        // everything above now applies to their first document. A no-op for
+        // a page that was not paused.
+        let _ = page
+            .inner
+            .cdp
+            .execute(
+                chromiumoxide::cdp::js_protocol::runtime::RunIfWaitingForDebuggerParams::default(),
+            )
+            .await;
         browser.remember_page(&page);
         self.inner.pages.lock().unwrap().push(page.clone());
         self.inner

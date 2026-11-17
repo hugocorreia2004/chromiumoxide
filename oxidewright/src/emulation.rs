@@ -445,6 +445,96 @@ async fn update_user_agent(page: &PageInner, options: &NewContextOptions) -> Res
     Ok(())
 }
 
+/// Settings a new page's first request and document need, sent before the
+/// page is resumed (it starts paused, see `wait_for_debugger_on_start`) and
+/// before anything waits on its renderer: a new window that needs a new
+/// renderer process answers renderer commands only once resumed, like
+/// Playwright sending its whole setup together with
+/// `Runtime.runIfWaitingForDebugger`. Init scripts are only queued (they
+/// reach the renderer when it starts); browser-side commands are awaited
+/// briefly. Returns whether the init scripts were installed.
+pub(crate) async fn preconfigure_new_page(
+    cdp: &chromiumoxide::Page,
+    context: &crate::BrowserContext,
+    init_scripts: &[String],
+) -> bool {
+    use chromiumoxide::cdp::browser_protocol::page::AddScriptToEvaluateOnNewDocumentParams;
+    use chromiumoxide::cdp::browser_protocol::page::GetFrameTreeParams;
+    use futures::FutureExt;
+    use std::time::Duration;
+    // A page whose renderer runs (in-process popups, new pages) answers right
+    // away: it gets the full setup and is resumed at the end of adoption.
+    if tokio::time::timeout(
+        Duration::from_millis(500),
+        cdp.execute(GetFrameTreeParams::default()),
+    )
+    .await
+    .is_ok()
+    {
+        return false;
+    }
+    let options = &context.inner.options;
+    let quick = |method: &'static str, params: Value| async move {
+        let _ = tokio::time::timeout(
+            Duration::from_secs(1),
+            cdp.execute(RawCommand::new(method, params)),
+        )
+        .await;
+    };
+    // Queue the init scripts first, without waiting for the renderer.
+    // Polling once queues each command on the page's channel ahead of the
+    // resume below; the replies only come once the renderer starts.
+    for script in init_scripts {
+        let mut params = AddScriptToEvaluateOnNewDocumentParams::new(script.clone());
+        params.run_immediately = Some(true);
+        let _ = cdp.execute(params).now_or_never();
+    }
+    if options.user_agent.is_some() || options.locale.is_some() {
+        let mut params = serde_json::Map::new();
+        params.insert(
+            "userAgent".into(),
+            json!(options.user_agent.clone().unwrap_or_default()),
+        );
+        if let Some(locale) = &options.locale {
+            params.insert("acceptLanguage".into(), json!(locale));
+        }
+        if let Some(ua) = &options.user_agent {
+            params.insert(
+                "userAgentMetadata".into(),
+                user_agent_metadata(ua, options.is_mobile.unwrap_or(false)),
+            );
+        }
+        quick("Emulation.setUserAgentOverride", Value::Object(params)).await;
+    }
+    let headers = context.inner.ext.extra_headers.lock().unwrap().clone();
+    let offline = context
+        .inner
+        .ext
+        .offline
+        .load(std::sync::atomic::Ordering::SeqCst);
+    if !headers.is_empty() || offline {
+        quick("Network.enable", json!({})).await;
+    }
+    if !headers.is_empty() {
+        let map: serde_json::Map<String, Value> = headers
+            .iter()
+            .map(|h| (h.name.clone(), json!(h.value)))
+            .collect();
+        quick("Network.setExtraHTTPHeaders", json!({ "headers": map })).await;
+    }
+    if offline {
+        quick(
+            "Network.emulateNetworkConditions",
+            json!({ "offline": true, "latency": 0, "downloadThroughput": -1, "uploadThroughput": -1 }),
+        )
+        .await;
+    }
+    let _ = cdp
+        .execute(chromiumoxide::cdp::js_protocol::runtime::RunIfWaitingForDebuggerParams::default())
+        .await;
+    true
+}
+
 /// Apply the context options to a newly attached page
 /// (`FrameSession._initialize`), only for options that are set.
 pub(crate) async fn init_page(page: &Page) -> Result<()> {

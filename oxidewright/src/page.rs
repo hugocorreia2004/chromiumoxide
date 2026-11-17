@@ -1133,7 +1133,21 @@ impl PageInner {
         &self,
         source: String,
     ) -> Result<(Weak<PageInner>, ScriptIdentifier)> {
-        let params = AddScriptToEvaluateOnNewDocumentParams::new(source);
+        self.add_init_script_source_with(source, false).await
+    }
+
+    /// `run_immediately` also runs the script in the current document: used
+    /// while setting up a new page (like Playwright's `runImmediately`), so
+    /// a popup's initial `about:blank` gets the context's scripts too.
+    pub(crate) async fn add_init_script_source_with(
+        &self,
+        source: String,
+        run_immediately: bool,
+    ) -> Result<(Weak<PageInner>, ScriptIdentifier)> {
+        let mut params = AddScriptToEvaluateOnNewDocumentParams::new(source);
+        if run_immediately {
+            params.run_immediately = Some(true);
+        }
         let id = self.cdp.evaluate_on_new_document(params).await?;
         Ok((self.self_weak.clone(), id))
     }

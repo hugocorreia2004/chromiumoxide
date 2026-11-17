@@ -36,6 +36,9 @@ pub(crate) struct BrowserInner {
     contexts: Mutex<Vec<BrowserContext>>,
     default_context: Mutex<Option<BrowserContext>>,
     pages: Mutex<HashMap<String, Weak<PageInner>>>,
+    /// Pages being adopted, so that a page is adopted once even when
+    /// `new_page` and the target listener both see it.
+    adoptions: Mutex<HashMap<String, Arc<tokio::sync::OnceCell<Page>>>>,
     connected: AtomicBool,
     launched: bool,
     version: String,
@@ -118,6 +121,7 @@ impl BrowserInner {
             contexts: Mutex::new(Vec::new()),
             default_context: Mutex::new(None),
             pages: Mutex::new(HashMap::new()),
+            adoptions: Mutex::new(HashMap::new()),
             connected: AtomicBool::new(true),
             launched,
             version,
@@ -249,6 +253,43 @@ impl BrowserInner {
     }
 
     /// The page of a target.
+    /// The adoption slot of a target (see `adoptions`).
+    pub(crate) fn adoption_cell(&self, target_id: &str) -> Arc<tokio::sync::OnceCell<Page>> {
+        self.adoptions
+            .lock()
+            .unwrap()
+            .entry(target_id.to_string())
+            .or_default()
+            .clone()
+    }
+
+    /// The adoption of a target is over (the page is in `pages` now).
+    pub(crate) fn finish_adoption(&self, target_id: &str) {
+        self.adoptions.lock().unwrap().remove(target_id);
+    }
+
+    /// The context owning pages of a CDP browser context: one created by
+    /// `new_context`, else the default context when it is exposed
+    /// (persistent or connected browsers).
+    pub(crate) fn context_for_cdp_context(
+        &self,
+        id: Option<&chromiumoxide::cdp::browser_protocol::browser::BrowserContextId>,
+    ) -> Option<BrowserContext> {
+        if let Some(id) = id {
+            let owned = self
+                .contexts
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|c| c.inner.id.as_ref() == Some(id))
+                .cloned();
+            if owned.is_some() {
+                return owned;
+            }
+        }
+        self.default_context.lock().unwrap().clone()
+    }
+
     pub(crate) fn page_by_target(&self, target_id: &str) -> Option<Arc<PageInner>> {
         self.pages
             .lock()

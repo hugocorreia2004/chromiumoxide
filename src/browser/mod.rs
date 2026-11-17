@@ -233,6 +233,7 @@ impl Browser {
             request_timeout: config.request_timeout,
             request_intercept: config.request_intercept,
             cache_enabled: config.cache_enabled,
+            wait_for_debugger_on_start: config.wait_for_debugger_on_start,
         };
 
         let fut = Handler::new(conn, rx, handler_config);

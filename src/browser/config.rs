@@ -95,6 +95,9 @@ pub struct BrowserConfig {
     /// Whether to enable cache
     pub cache_enabled: bool,
 
+    /// See [`crate::handler::HandlerConfig::wait_for_debugger_on_start`].
+    pub wait_for_debugger_on_start: bool,
+
     /// Avoid easy bot detection by setting `navigator.webdriver` to false
     pub(crate) hidden: bool,
 
@@ -124,6 +127,7 @@ pub struct BrowserConfigBuilder {
     disable_default_args: bool,
     request_intercept: bool,
     cache_enabled: bool,
+    wait_for_debugger_on_start: bool,
     hidden: bool,
     start_urls: Vec<String>,
 }
@@ -161,6 +165,7 @@ impl Default for BrowserConfigBuilder {
             disable_default_args: false,
             request_intercept: false,
             cache_enabled: true,
+            wait_for_debugger_on_start: false,
             hidden: false,
             start_urls: Vec::new(),
         }
@@ -337,6 +342,13 @@ impl BrowserConfigBuilder {
         self
     }
 
+    /// Pause new targets on start until their owner resumes them (see
+    /// [`crate::handler::HandlerConfig::wait_for_debugger_on_start`]).
+    pub fn wait_for_debugger_on_start(mut self) -> Self {
+        self.wait_for_debugger_on_start = true;
+        self
+    }
+
     pub fn hide(mut self) -> Self {
         self.hidden = true;
         if self.hidden && self.viewport == Some(Viewport::default()) {
@@ -372,6 +384,7 @@ impl BrowserConfigBuilder {
             disable_default_args: self.disable_default_args,
             request_intercept: self.request_intercept,
             cache_enabled: self.cache_enabled,
+            wait_for_debugger_on_start: self.wait_for_debugger_on_start,
             hidden: self.hidden,
             start_urls: self.start_urls,
         })

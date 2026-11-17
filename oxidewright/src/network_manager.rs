@@ -240,10 +240,30 @@ impl NetworkManager {
         initial: bool,
     ) -> crate::Result<()> {
         if !(initial && !interception) {
+            // Playwright disables the cache whenever requests are intercepted.
+            // With `stealth`, like Patchright, only for user routes and HAR
+            // recording: interception that only answers authentication
+            // challenges keeps the normal cache (re-downloading everything
+            // is an automation hint).
+            let cache_disabled = if cfg!(feature = "stealth") {
+                // From the routes themselves: on a new page's first setup the
+                // `user_interception` flag is not computed yet.
+                let context = page.context.upgrade();
+                let user = !page.ext.routes.lock().unwrap().is_empty()
+                    || context
+                        .as_ref()
+                        .is_some_and(|c| !c.ext.routes.lock().unwrap().is_empty());
+                let har = context
+                    .as_ref()
+                    .is_some_and(|c| !c.ext.har_recorders.lock().unwrap().is_empty());
+                interception && (user || har)
+            } else {
+                interception
+            };
             send(
                 page,
                 Some(session.clone()),
-                SetCacheDisabledParams::new(interception),
+                SetCacheDisabledParams::new(cache_disabled),
             )
             .await?;
             if interception {

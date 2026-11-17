@@ -126,9 +126,12 @@ macro_rules! advance_state {
                 })),
                 Some(Err(_)) => Some($s.on_initialization_failed()),
             };
-        } else {
+        } else if !$s.paused {
             return None;
         }
+        // A paused target answers some init commands only once resumed, and
+        // its owner resumes it after sending its own commands: keep those
+        // flowing while the init chain waits.
     }};
 }
 
@@ -182,6 +185,9 @@ pub struct Target {
     wait_for_navigation_results: Vec<Sender<Result<ArcHttpRequest>>>,
     /// The sender who requested the page.
     initiator: Option<Sender<Result<Page>>>,
+    /// Attached while paused on start: the page is handed over without
+    /// waiting for its first load (the owner resumes it).
+    paused: bool,
     /// After this instant the page is handed to its initiator even if the
     /// main frame never finished loading, so `Browser::new_page` cannot hang
     /// on a document that never fires `load`.
@@ -201,6 +207,11 @@ impl Target {
     /// `CreateTargetParams` request.
     pub fn new(info: TargetInfo, config: TargetConfig, browser_context: BrowserContext) -> Self {
         let ty = TargetType::new(&info.r#type);
+        let init_state = if config.wait_for_debugger_on_start && ty.is_page() {
+            TargetInit::AwaitingAutoAttach
+        } else {
+            TargetInit::AttachToTarget
+        };
         let request_timeout = config.request_timeout;
         let mut network_manager = NetworkManager::new(config.ignore_https_errors, request_timeout);
 
@@ -216,7 +227,8 @@ impl Target {
             emulation_manager: EmulationManager::new(request_timeout),
             session_id: None,
             page: None,
-            init_state: TargetInit::AttachToTarget,
+            init_state,
+            paused: false,
             iframe_init_states: Default::default(),
             main_isolated_world_attempted: false,
             wait_for_frame_navigation: Default::default(),
@@ -238,6 +250,26 @@ impl Target {
     pub fn set_session_id(&mut self, id: SessionId) {
         self.frame_manager.set_main_session_id(id.clone());
         self.session_id = Some(id)
+    }
+
+    /// The browser auto-attached this target (`wait_for_debugger_on_start`).
+    /// Returns `false` (and changes nothing) when the target already has a
+    /// session: a later attach must never replace the working one.
+    pub(crate) fn on_auto_attached(&mut self, id: SessionId, waiting_for_debugger: bool) -> bool {
+        if self.session_id.is_some() {
+            return false;
+        }
+        self.set_session_id(id);
+        self.paused = waiting_for_debugger;
+        if matches!(
+            self.init_state,
+            TargetInit::AwaitingAutoAttach | TargetInit::AttachToTarget
+        ) {
+            self.init_state = TargetInit::InitializingFrame(FrameManager::init_commands(
+                self.config.request_timeout,
+            ));
+        }
+        true
     }
 
     pub fn session_id(&self) -> Option<&SessionId> {
@@ -1516,6 +1548,21 @@ impl Target {
             // `Target` events
             CdpEvent::TargetAttachedToTarget(ev) => {
                 let is_iframe = ev.target_info.r#type == "iframe";
+                // With browser-level auto-attach a popup is also attached to
+                // its opener's session: like Playwright, detach that one
+                // without resuming; the browser-level session owns the page
+                // and resumes it once configured.
+                if self.config.wait_for_debugger_on_start && ev.target_info.r#type == "page" {
+                    let detach = DetachFromTargetParams::builder()
+                        .session_id(ev.session_id.clone())
+                        .build();
+                    self.queued_events.push_back(TargetEvent::Request(Request {
+                        method: detach.identifier(),
+                        session_id: event_session_id.clone().map(Into::into),
+                        params: serde_json::to_value(detach).unwrap(),
+                    }));
+                    return;
+                }
                 if is_iframe {
                     self.queued_events
                         .push_back(TargetEvent::RegisterChildSession(ev.session_id.clone()));
@@ -1703,6 +1750,7 @@ impl Target {
             return None;
         }
         match &mut self.init_state {
+            TargetInit::AwaitingAutoAttach => return None,
             TargetInit::AttachToTarget => {
                 self.init_state = TargetInit::InitializingFrame(FrameManager::init_commands(
                     self.config.request_timeout,
@@ -1753,9 +1801,10 @@ impl Target {
                         })),
                         Some(Err(_)) => Some(self.on_initialization_failed()),
                     };
-                } else {
+                } else if !self.paused {
                     return None;
                 }
+                // Paused: see `advance_state!`.
             }
             TargetInit::InitializingNetwork(cmds) => {
                 advance_state!(
@@ -1803,7 +1852,8 @@ impl Target {
                             "main frame did not finish loading in time; handing the page over"
                         );
                     }
-                    if loaded || expired {
+                    // A paused page loads nothing until its owner resumes it.
+                    if loaded || expired || self.paused {
                         if let Some(page) = self.get_or_create_page() {
                             let page = Page::from(page.clone());
                             let delivered = initiator.send(Ok(page)).is_ok();
@@ -2263,6 +2313,9 @@ pub struct TargetConfig {
     pub viewport: Option<Viewport>,
     pub request_intercept: bool,
     pub cache_enabled: bool,
+    /// Targets are auto-attached by the browser and paused on start (see
+    /// [`crate::handler::HandlerConfig::wait_for_debugger_on_start`]).
+    pub wait_for_debugger_on_start: bool,
 }
 
 impl Default for TargetConfig {
@@ -2273,6 +2326,7 @@ impl Default for TargetConfig {
             viewport: Default::default(),
             request_intercept: false,
             cache_enabled: true,
+            wait_for_debugger_on_start: false,
         }
     }
 }
@@ -2630,6 +2684,8 @@ pub enum TargetInit {
     InitializingPage(CommandChain),
     InitializingEmulation(CommandChain),
     AttachToTarget,
+    /// Waiting for the browser's auto-attach (no attach of our own).
+    AwaitingAutoAttach,
     Initialized,
     Closing,
 }
@@ -2642,6 +2698,7 @@ impl TargetInit {
             TargetInit::InitializingPage(cmd) => Some(cmd),
             TargetInit::InitializingEmulation(cmd) => Some(cmd),
             TargetInit::AttachToTarget => None,
+            TargetInit::AwaitingAutoAttach => None,
             TargetInit::Initialized => None,
             TargetInit::Closing => None,
         }

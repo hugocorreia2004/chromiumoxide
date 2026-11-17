@@ -385,11 +385,23 @@ pub(crate) async fn start_target_listener(inner: &Arc<BrowserInner>, cdp: &chrom
             if info.r#type != "page" {
                 continue;
             }
-            let Some(opener_id) = info.opener_id.clone() else {
-                continue;
-            };
             let Some(browser) = weak.upgrade() else {
                 break;
+            };
+            // New pages start paused until adopted and configured; one that
+            // nobody adopts (a context we do not own, a failed adoption) must
+            // not stay paused forever.
+            tokio::spawn(resume_if_not_adopted(
+                Arc::downgrade(&browser),
+                info.target_id.clone(),
+            ));
+            let Some(opener_id) = info.opener_id.clone() else {
+                // Like Playwright, every page of a known context is reported
+                // (e.g. `target=_blank rel=noopener` links).
+                let target_id = info.target_id.clone();
+                let context_id = info.browser_context_id.clone();
+                tokio::spawn(adopt_new_page(browser, target_id, context_id));
+                continue;
             };
             let target_id = info.target_id.clone();
             tokio::spawn(async move {
@@ -397,6 +409,53 @@ pub(crate) async fn start_target_listener(inner: &Arc<BrowserInner>, cdp: &chrom
             });
         }
     });
+}
+
+async fn adopt_new_page(
+    browser: Arc<BrowserInner>,
+    target_id: chromiumoxide::cdp::browser_protocol::target::TargetId,
+    context_id: Option<chromiumoxide::cdp::browser_protocol::browser::BrowserContextId>,
+) {
+    let Some(context) = browser.context_for_cdp_context(context_id.as_ref()) else {
+        return;
+    };
+    let mut cdp_page = None;
+    for _ in 0..250 {
+        if browser.page_by_target(target_id.as_ref()).is_some() {
+            return;
+        }
+        if let Ok(page) = browser.get_cdp_page(target_id.clone()).await {
+            cdp_page = Some(page);
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    let Some(cdp_page) = cdp_page else {
+        return;
+    };
+    if let Err(err) = context.adopt_page(cdp_page).await {
+        tracing::debug!("failed to adopt a new page: {err}");
+    }
+}
+
+async fn resume_if_not_adopted(
+    browser: std::sync::Weak<BrowserInner>,
+    target_id: chromiumoxide::cdp::browser_protocol::target::TargetId,
+) {
+    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+    let Some(browser) = browser.upgrade() else {
+        return;
+    };
+    if browser.page_by_target(target_id.as_ref()).is_some() {
+        return;
+    }
+    if let Ok(page) = browser.get_cdp_page(target_id).await {
+        let _ = page
+            .execute(
+                chromiumoxide::cdp::js_protocol::runtime::RunIfWaitingForDebuggerParams::default(),
+            )
+            .await;
+    }
 }
 
 async fn adopt_popup(

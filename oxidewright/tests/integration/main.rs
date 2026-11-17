@@ -33,6 +33,7 @@ mod page_network;
 mod page_route;
 mod page_wait_for;
 mod page_wait_for_function;
+mod popup;
 mod proxy;
 mod route_web_socket;
 mod screenshot;
