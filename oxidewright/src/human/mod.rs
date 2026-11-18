@@ -52,7 +52,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Map, Value};
 
-use crate::{CDPSession, Error, EventKind, Locator, Page, Result};
+use crate::{BrowserContext, CDPSession, Error, EventKind, Locator, Page, Result};
 
 pub use correction::{CorrectionPlan, correction_plan};
 pub use keyboard::KeyboardLayout;
@@ -436,6 +436,16 @@ impl Human {
         forget(&self.inner, page_key(page));
     }
 
+    /// Forget every page (mouse positions, protocol sessions); the traits
+    /// stay. Done by itself when the browser context closes.
+    pub fn forget_all(&self) {
+        let mut state = self.inner.state.lock().unwrap();
+        state.positions.clear();
+        state.sessions.clear();
+        state.watched.clear();
+        state.last_page = None;
+    }
+
     /// How many pages this person remembers a mouse position for.
     #[doc(hidden)]
     pub fn remembered_pages(&self) -> usize {
@@ -531,6 +541,40 @@ impl Human {
             .insert(key, session.clone());
         self.watch(page);
         Ok(session)
+    }
+}
+
+impl BrowserContext {
+    /// The simulated person using this browser context: created (with random
+    /// traits) the first time it is asked for, the same one after that, and
+    /// dropped when the context closes (the browser closing closes it too).
+    /// Use [`BrowserContext::set_human`] first to choose its seed, layout...
+    pub fn human(&self) -> Human {
+        let mut slot = self.inner.human.lock().unwrap();
+        if let Some(h) = slot.as_ref() {
+            return h.clone();
+        }
+        let h = Human::new();
+        if !self.is_closed() {
+            *slot = Some(h.clone());
+        }
+        h
+    }
+
+    /// Make `human` the person using this context (before the first
+    /// [`BrowserContext::human`], to configure it).
+    pub fn set_human(&self, human: Human) {
+        if !self.is_closed() {
+            *self.inner.human.lock().unwrap() = Some(human);
+        }
+    }
+}
+
+impl Page {
+    /// The simulated person using this page's browser context; see
+    /// [`BrowserContext::human`].
+    pub fn human(&self) -> Human {
+        self.context().map_or_else(Human::new, |c| c.human())
     }
 }
 

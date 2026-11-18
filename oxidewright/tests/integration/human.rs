@@ -322,3 +322,42 @@ fn each_page_keeps_its_own_mouse_and_a_closed_page_is_forgotten() {
         human.move_to(&t.page, 320.0, 260.0).await.unwrap();
     });
 }
+
+#[test]
+fn the_context_creates_its_person_and_drops_it_when_it_closes() {
+    run(|t| async move {
+        let context = t.browser.new_context().await.unwrap();
+        let page = context.new_page().await.unwrap();
+        // The same person every time, from the context or from its pages.
+        let human = page.human();
+        assert_eq!(human.traits(), context.human().traits());
+        human.move_to(&page, 300.0, 200.0).await.unwrap();
+        assert_eq!(page.human().mouse_position(&page), (300.0, 200.0));
+        assert_eq!(human.remembered_pages(), 1);
+        context.close().await.unwrap();
+        // Closing the context forgot everything and let the person go.
+        assert_eq!(human.remembered_pages(), 0);
+        // A configured person.
+        let other = t.browser.new_context().await.unwrap();
+        other.set_human(Human::with_seed(42).layout(KeyboardLayout::Pt));
+        assert_eq!(other.human().traits(), Human::with_seed(42).traits());
+        other.close().await.unwrap();
+    });
+}
+
+#[test]
+fn closing_the_browser_drops_the_person() {
+    run(|_t| async move {
+        let mut launch = oxidewright::chromium().launch();
+        if let Ok(path) = std::env::var("OXIDEWRIGHT_CHROME") {
+            launch = launch.executable_path(path);
+        }
+        let browser = launch.await.unwrap();
+        let page = browser.new_page().await.unwrap();
+        let human = page.human();
+        human.move_to(&page, 300.0, 200.0).await.unwrap();
+        assert_eq!(human.remembered_pages(), 1);
+        browser.close().await.unwrap();
+        assert_eq!(human.remembered_pages(), 0);
+    });
+}

@@ -167,7 +167,10 @@ style), whose mouse, keyboard, pauses and scrolling look like a person's.
 # async fn run(page: oxidewright::Page) -> oxidewright::Result<()> {
 use oxidewright::human::{Human, KeyboardLayout, PauseKind, ReadingKind};
 
-let human = Human::new().layout(KeyboardLayout::Es);
+// The person of this browser context: created on first use, the same one
+// after that, dropped when the context (or the browser) closes.
+page.context().unwrap().set_human(Human::new().layout(KeyboardLayout::Es));
+let human = page.human();
 human.read(&page, ReadingKind::ScanningPage).await;
 human.type_text(&page.locator("#name"), "María").await?;
 human.type_text(&page.locator("#dob"), "14031987").groups([2, 2, 4]).await?;
@@ -186,6 +189,7 @@ human.pause(PauseKind::AfterSubmit).await;
 | Pauses | `pause`, `read`, `think`, `maybe_distraction`, with the mouse drifting meanwhile; `read_text` reads a text with the mouse resting near the next target |
 | Scrolling | Gliding wheel pushes in gestures, in the person's style; `explore` looks over a page |
 | Touch | `mobile(true)`: taps and swipes instead of clicks and the wheel |
+| Lifetime | One person per browser context (`context.human()`, `page.human()`), dropped when the context or the browser closes, even when the window is closed by hand; each page has its own mouse position, forgotten when the page closes. `Human::new()` / `with_seed(n)` make a person you own yourself |
 
 ## Assertions (`expect`)
 
