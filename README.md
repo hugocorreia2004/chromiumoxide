@@ -1,3 +1,8 @@
+> [!IMPORTANT]
+> **This repository moved to [hugocorreia2004/oxidewright](https://github.com/hugocorreia2004/oxidewright)**,
+> with its full history. This fork is archived (read only); new work happens there.
+> Depend on `oxidewright = { git = "https://github.com/hugocorreia2004/oxidewright" }`.
+
 # chromiumoxide
 
 ![Build](https://github.com/mattsse/chromiumoxide/workflows/Continuous%20integration/badge.svg)
