@@ -319,7 +319,7 @@ fn lh_009_should_work_when_owner_frame_detaches() {
         t.page.goto(&t.server.empty_page).await.unwrap();
         t.page
             .evaluate::<()>(
-                "() => { const iframe = document.createElement('iframe'); iframe.src = 'data:text/html,<body>hello from iframe</body>'; document.body.append(iframe); const target = document.createElement('button'); target.textContent = 'Click me'; target.id = 'target'; target.addEventListener('click', () => window._clicked = true); document.body.appendChild(target); const closeButton = document.createElement('button'); closeButton.textContent = 'close'; closeButton.id = 'close'; closeButton.addEventListener('click', () => iframe.remove()); document.body.appendChild(closeButton); }",
+                "async () => { const iframe = document.createElement('iframe'); iframe.src = 'data:text/html,<body>hello from iframe</body>'; const loaded = new Promise(r => iframe.onload = r); document.body.append(iframe); await loaded; const target = document.createElement('button'); target.textContent = 'Click me'; target.id = 'target'; target.addEventListener('click', () => window._clicked = true); document.body.appendChild(target); const closeButton = document.createElement('button'); closeButton.textContent = 'close'; closeButton.id = 'close'; closeButton.addEventListener('click', () => iframe.remove()); document.body.appendChild(closeButton); }",
             )
             .await
             .unwrap();

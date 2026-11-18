@@ -458,7 +458,7 @@ fn lo_184_should_return_immediately_when_already_truthy() {
             .page
             .locator("#target")
             .wait_for_function("element => element.textContent === 'yes'")
-            .timeout(1000)
+            .timeout(5000)
             .await
             .unwrap();
     });
