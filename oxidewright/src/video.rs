@@ -144,7 +144,7 @@ impl Video {
     }
 
     /// Finalize the recording now.
-    async fn stop(&self) {
+    pub(crate) async fn stop(&self) {
         if let Some(stop) = self.inner.stop.lock().unwrap().take() {
             let _ = stop.send(());
         }
@@ -188,7 +188,7 @@ pub(crate) async fn start_for_page(page: &Page) -> Result<()> {
     let Some(dir) = context.inner.options.record_video_dir.clone() else {
         return Ok(());
     };
-    let ffmpeg = require_ffmpeg()?;
+    require_ffmpeg()?;
     tokio::fs::create_dir_all(&dir)
         .await
         .map_err(|e| Error::invalid_argument(format!("{}: {e}", dir.display())))?;
@@ -201,6 +201,19 @@ pub(crate) async fn start_for_page(page: &Page) -> Result<()> {
         .options
         .record_video_size
         .unwrap_or_else(|| screencast::default_size(page.viewport_size()));
+    let size = ViewportSize {
+        width: size.width & !1,
+        height: size.height & !1,
+    };
+    let video = record(page, size, path).await?;
+    *page.inner.emu.capture.video.lock().unwrap() = Some(video);
+    Ok(())
+}
+
+/// Record the page's screencast to a webm file at `path` with ffmpeg until
+/// the returned video is stopped (`Video::stop`) or the page closes.
+pub(crate) async fn record(page: &Page, size: ViewportSize, path: PathBuf) -> Result<Video> {
+    let ffmpeg = require_ffmpeg()?;
     let size = ViewportSize {
         width: size.width & !1,
         height: size.height & !1,
@@ -295,14 +308,13 @@ pub(crate) async fn start_for_page(page: &Page) -> Result<()> {
         }
         let _ = done_tx.send(Some(result));
     });
-    *page.inner.emu.capture.video.lock().unwrap() = Some(Video {
+    Ok(Video {
         inner: Arc::new(VideoInner {
             path,
             finished: done_rx,
             stop: Mutex::new(Some(stop_tx)),
         }),
-    });
-    Ok(())
+    })
 }
 
 /// Finalize the page's video (page or context closing).

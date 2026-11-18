@@ -886,6 +886,14 @@ Also: `page`, `is_closed`.
 | `video.path()` | `video.path()` |  |
 | `video.saveAs()` | `video.save_as(path).await` |  |
 
+### Screencast
+
+| Playwright | oxidewright | Notes |
+|---|---|---|
+| `page.screencast.start({ onFrame, path, size, quality, fps })` | `page.screencast().start().on_frame(\|f\| ..).path(p).size(..).quality(..).fps(..).await` | frames are JPEG (`ScreencastFrame`); `path` records a webm video (needs ffmpeg) |
+| `page.screencast.stop()` | `page.screencast().stop().await` | finalizes the video |
+| `showActions` / `hideActions` / `showOverlay(s)` / `hideOverlays` / `showChapter` | not implemented | they draw into the page, which page scripts can observe |
+
 ### Selectors
 
 | Playwright | oxidewright | Notes |

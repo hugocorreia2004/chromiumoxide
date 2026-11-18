@@ -38,6 +38,7 @@ mod page_wait_for_function;
 mod popup;
 mod proxy;
 mod route_web_socket;
+mod screencast;
 mod screenshot;
 mod selectors;
 mod smoke;

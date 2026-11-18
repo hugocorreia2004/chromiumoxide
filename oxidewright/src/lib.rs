@@ -148,6 +148,7 @@ mod progress;
 mod proxy;
 mod route;
 mod screencast;
+mod screencast_api;
 mod screenshot;
 mod selector_parser;
 mod selectors;
@@ -233,6 +234,7 @@ pub use route::{
     APIResponse, Abort, Continue, Fallback, Fetch, Fulfill, Route, RouteBuilder, RouteHandlerFn,
     RouteId, Unroute, UnrouteAll, UnrouteBehavior,
 };
+pub use screencast_api::{Screencast, ScreencastFrame, StartScreencast};
 pub use screenshot::{
     Animations, Caret, ElementScreenshot, Mask, PageScreenshot, Rect, ScreenshotScale,
     ScreenshotType,
