@@ -934,6 +934,14 @@ Also: `page`, `is_closed`.
 * `WebError`: the `pageerror`/`weberror` payload is `oxidewright::WebError` with `name`,
   `message` and `stack` fields (`webError.error()`), plus `location()` and `page()`.
 * `Electron`, `Android`, `firefox`, `webkit`: Chromium only.
+* `page.pause()`, `pickLocator()`, `context.debugger` (`Debugger`): they drive Playwright's
+  inspector UI, which only exists in the Node.js package.
+* `WebMCP` (`page.webmcp`): relies on an experimental Chrome API for AI agents that stable
+  Chrome does not expose.
+* `browserType.launchServer()` / `connect()` / `BrowserServer`: the Playwright server protocol
+  (the Node.js server); use `connect_over_cdp` to share a browser.
+* `clientCertificates` of browser contexts: Playwright proxies the pages' TLS through an
+  internal interceptor; only `APIRequestContext` takes client certificates for now.
 * `exposeFunctions` (option of `evaluate`/`addInitScript`): JavaScript functions inside the
   argument become callable in the page. Rust arguments are data and cannot carry closures; use
   `page.expose_function` / `expose_binding` (which also avoid the bindings-controller global the
