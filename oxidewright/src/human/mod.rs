@@ -45,14 +45,14 @@ mod reading;
 mod touch;
 mod typing;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::future::IntoFuture;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
 use serde_json::{Map, Value};
 
-use crate::{CDPSession, Error, Locator, Page, Result};
+use crate::{CDPSession, Error, EventKind, Locator, Page, Result};
 
 pub use correction::{CorrectionPlan, correction_plan};
 pub use keyboard::KeyboardLayout;
@@ -168,6 +168,8 @@ struct State {
     last_page: Option<Page>,
     last_click: Option<Instant>,
     sessions: HashMap<usize, CDPSession>,
+    /// Pages whose close this person listens to.
+    watched: HashSet<usize>,
     variations: Map<String, Value>,
 }
 
@@ -359,7 +361,8 @@ impl Human {
         state.variations.insert(key.to_string(), (n + 1).into());
     }
 
-    /// Where this person's mouse is on `page` (placed near an edge the first time).
+    /// Where this person's mouse is on `page` (placed near an edge the first
+    /// time). Each page has its own position, forgotten when the page closes.
     pub fn mouse_position(&self, page: &Page) -> (f64, f64) {
         let key = page_key(page);
         if let Some(p) = self.inner.state.lock().unwrap().positions.get(&key) {
@@ -377,6 +380,7 @@ impl Human {
             _ => (int(vw * 0.15, vw * 0.55), int(vh * 0.85, vh)),
         };
         self.inner.state.lock().unwrap().positions.insert(key, p);
+        self.watch(page);
         p
     }
 
@@ -402,6 +406,40 @@ impl Human {
         let mut state = self.inner.state.lock().unwrap();
         state.positions.insert(page_key(page), (x, y));
         state.last_page = Some(page.clone());
+        drop(state);
+        self.watch(page);
+    }
+
+    /// Forget a page when it closes: its mouse position and its protocol
+    /// session (the person's traits stay). Registered once per page.
+    fn watch(&self, page: &Page) {
+        let key = page_key(page);
+        if !self.inner.state.lock().unwrap().watched.insert(key) {
+            return;
+        }
+        // Weak: the page's listener must not keep the person alive.
+        let inner: Weak<Inner> = Arc::downgrade(&self.inner);
+        page.once(EventKind::Close, move |_| {
+            if let Some(inner) = inner.upgrade() {
+                forget(&inner, key);
+            }
+        });
+        // Closed before the listener was in place: forget it now.
+        if page.is_closed() {
+            forget(&self.inner, key);
+        }
+    }
+
+    /// Forget what this person knows about `page` (its mouse position and
+    /// its protocol session); done by itself when the page closes.
+    pub fn forget_page(&self, page: &Page) {
+        forget(&self.inner, page_key(page));
+    }
+
+    /// How many pages this person remembers a mouse position for.
+    #[doc(hidden)]
+    pub fn remembered_pages(&self) -> usize {
+        self.inner.state.lock().unwrap().positions.len()
     }
 
     fn last_page(&self) -> Option<Page> {
@@ -491,7 +529,18 @@ impl Human {
             .unwrap()
             .sessions
             .insert(key, session.clone());
+        self.watch(page);
         Ok(session)
+    }
+}
+
+fn forget(inner: &Inner, key: usize) {
+    let mut state = inner.state.lock().unwrap();
+    state.positions.remove(&key);
+    state.sessions.remove(&key);
+    state.watched.remove(&key);
+    if state.last_page.as_ref().is_some_and(|p| page_key(p) == key) {
+        state.last_page = None;
     }
 }
 

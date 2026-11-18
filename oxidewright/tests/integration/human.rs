@@ -297,3 +297,28 @@ fn press_sends_a_held_key() {
         assert!(up.t - down.t >= 25.0);
     });
 }
+
+#[test]
+fn each_page_keeps_its_own_mouse_and_a_closed_page_is_forgotten() {
+    run(|t| async move {
+        let human = Human::with_seed(11);
+        let other = t.context.new_page().await.unwrap();
+        human.move_to(&t.page, 300.0, 200.0).await.unwrap();
+        human.move_to(&other, 700.0, 500.0).await.unwrap();
+        // Moving in the other page does not move the mouse of the first one.
+        assert_eq!(human.mouse_position(&t.page), (300.0, 200.0));
+        assert_eq!(human.mouse_position(&other), (700.0, 500.0));
+        assert_eq!(human.remembered_pages(), 2);
+        other.close().await.unwrap();
+        for _ in 0..50 {
+            if human.remembered_pages() == 1 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert_eq!(human.remembered_pages(), 1);
+        // The person and the first page go on as before.
+        assert_eq!(human.mouse_position(&t.page), (300.0, 200.0));
+        human.move_to(&t.page, 320.0, 260.0).await.unwrap();
+    });
+}
