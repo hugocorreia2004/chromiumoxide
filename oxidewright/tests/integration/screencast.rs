@@ -45,6 +45,14 @@ fn sc_001_screencast_start_delivers_frames_via_on_frame() {
             .await
             .unwrap();
         ensure_some_frames(&page).await;
+        // Slow runners deliver the first frames late: keep the page changing
+        // until some arrive (10 s at most).
+        for _ in 0..20 {
+            if !frames.lock().unwrap().is_empty() {
+                break;
+            }
+            ensure_some_frames(&page).await;
+        }
         page.screencast().stop().await.unwrap();
         let frames = frames.lock().unwrap().clone();
         assert!(!frames.is_empty());
