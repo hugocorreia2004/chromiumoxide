@@ -499,6 +499,13 @@ impl Page {
         self.snapshot_builder("page.ariaSnapshotJSON")
     }
 
+    /// The element with this `ref` in the last `"ai"`-mode ARIA snapshot
+    /// (e.g. `e3`), for agents acting on a snapshot (Playwright's
+    /// `page.getByRef()`).
+    pub fn get_by_ref(&self, aria_ref: &str) -> crate::Locator {
+        self.locator(format!("aria-ref={aria_ref}"))
+    }
+
     fn snapshot_builder<T>(&self, api: &'static str) -> PageAriaSnapshot<T> {
         PageAriaSnapshot {
             page: self.clone(),

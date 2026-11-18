@@ -1212,3 +1212,31 @@ fn wo_should_report_console_logs() {
         context.close().await.unwrap();
     });
 }
+
+#[test]
+fn ar_048_get_by_ref_should_find_elements_of_an_ai_snapshot() {
+    run(|t| async move {
+        t.page
+            .set_content("<button>One</button><button>Two</button><button>Three</button>")
+            .await
+            .unwrap();
+        let snapshot = t.page.aria_snapshot().mode("ai").await.unwrap();
+        assert!(snapshot.contains("button \"Two\" [ref=e3]"), "{snapshot}");
+        for (aria_ref, text) in [("e2", "One"), ("e3", "Two"), ("e4", "Three")] {
+            oxidewright::expect::expect(&t.page.get_by_ref(aria_ref))
+                .to_have_text(text)
+                .await
+                .unwrap();
+        }
+        t.page
+            .get_by_ref("e3")
+            .evaluate::<()>("e => { e.textContent = 'Not Two'; }")
+            .await
+            .unwrap();
+        let snapshot = t.page.aria_snapshot().mode("ai").await.unwrap();
+        assert!(
+            snapshot.contains("button \"Not Two\" [ref=e5]"),
+            "{snapshot}"
+        );
+    });
+}

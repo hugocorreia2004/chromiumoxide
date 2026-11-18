@@ -327,7 +327,7 @@ Also: `wait_for_page`, `wait_for_request`, `wait_for_response`, `wait_for_consol
 | `page.getByAltText()` | `page.get_by_alt_text(text)` |  |
 | `page.getByLabel()` | `page.get_by_label(text)` |  |
 | `page.getByPlaceholder()` | `page.get_by_placeholder(text)` |  |
-| `page.getByRef()` | missing | not implemented yet |
+| `page.getByRef(ref)` | `page.get_by_ref("e3")` | refs of the last `aria_snapshot().mode("ai")` |
 | `page.getByRole()` | `page.get_by_role(role)` | `get_by_role_with(role, GetByRoleOptions::new().name(..))` for options |
 | `page.getByTestId()` | `page.get_by_test_id(test_id)` |  |
 | `page.getByText()` | `page.get_by_text(text)` | `get_by_text_with(text, GetByOptions::exact())`; same `_with` pattern for alt text, label, placeholder, title |
@@ -926,6 +926,10 @@ Also: `page`, `is_closed`.
 * `WebError`: the `pageerror`/`weberror` payload is `oxidewright::WebError` with `name`,
   `message` and `stack` fields (`webError.error()`), plus `location()` and `page()`.
 * `Electron`, `Android`, `firefox`, `webkit`: Chromium only.
+* `exposeFunctions` (option of `evaluate`/`addInitScript`): JavaScript functions inside the
+  argument become callable in the page. Rust arguments are data and cannot carry closures; use
+  `page.expose_function` / `expose_binding` (which also avoid the bindings-controller global the
+  option installs in the page's main world).
 
 ## Assertions (expect)
 
