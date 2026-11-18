@@ -71,6 +71,37 @@ fn wa_004_should_poll_on_interval() {
 }
 
 #[test]
+fn wa_005_no_side_effects_when_the_timeout_hits_while_starting() {
+    run(|t| async move {
+        // The first check runs while the loop is being started and takes
+        // 300 ms, so the 100 ms timeout expires before the loop's handle
+        // comes back: the loop must still be aborted.
+        let _ = t
+            .page
+            .wait_for_function(
+                "() => { const end = Date.now() + 300; while (Date.now() < end) {} window['counter'] = (window['counter'] || 0) + 1; return false; }",
+            )
+            .polling(1)
+            .timeout(100)
+            .await
+            .unwrap_err();
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        let saved: u64 = t
+            .page
+            .evaluate("() => window['counter'] || 0")
+            .await
+            .unwrap();
+        t.page.wait_for_timeout(1000).await.unwrap();
+        let now: u64 = t
+            .page
+            .evaluate("() => window['counter'] || 0")
+            .await
+            .unwrap();
+        assert_eq!(now, saved);
+    });
+}
+
+#[test]
 fn wa_005_should_avoid_side_effects_after_timeout() {
     run(|t| async move {
         let context = t.browser.new_context().console_events(true).await.unwrap();
