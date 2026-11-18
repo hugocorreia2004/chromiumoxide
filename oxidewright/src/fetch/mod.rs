@@ -303,6 +303,8 @@ fn default_user_agent() -> String {
     )
 }
 
+// One per request context: the size difference does not matter.
+#[allow(clippy::large_enum_variant)]
 enum Kind {
     Global {
         defaults: Defaults,

@@ -32,17 +32,17 @@ fn se_160_should_work() {
             .unwrap();
         for engine in ["se160tag", "se160tag2"] {
             let name: String = page
-                .eval_on_selector(&format!("{engine}=DIV"), "e => e.nodeName")
+                .eval_on_selector(format!("{engine}=DIV"), "e => e.nodeName")
                 .await
                 .unwrap();
             assert_eq!(name, "DIV");
             let name: String = page
-                .eval_on_selector(&format!("{engine}=SPAN"), "e => e.nodeName")
+                .eval_on_selector(format!("{engine}=SPAN"), "e => e.nodeName")
                 .await
                 .unwrap();
             assert_eq!(name, "SPAN");
             let count: usize = page
-                .eval_on_selector_all(&format!("{engine}=DIV"), "es => es.length")
+                .eval_on_selector_all(format!("{engine}=DIV"), "es => es.length")
                 .await
                 .unwrap();
             assert_eq!(count, 2);
