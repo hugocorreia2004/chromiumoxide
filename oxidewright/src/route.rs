@@ -339,12 +339,18 @@ impl Route {
     ///
     /// Unlike Playwright, the request is not sent from outside the browser:
     /// it keeps the browser's TLS/HTTP fingerprint and cookies. It can be
-    /// called once per route; redirects are returned as-is.
+    /// called once per route. A redirect response is followed (up to
+    /// `.max_redirects(n)`, default 20, like Playwright) with the context's
+    /// [`crate::APIRequestContext`], i.e. outside the browser; with
+    /// `.max_redirects(0)` the redirect is returned as-is.
     pub fn fetch(&self) -> Fetch {
         Fetch {
             route: self.clone(),
             overrides: ContinueOverrides::default(),
             serialization_error: None,
+            timeout: None,
+            max_redirects: None,
+            max_retries: None,
         }
     }
 
@@ -695,10 +701,96 @@ pub struct Fetch {
     route: Route,
     overrides: ContinueOverrides,
     serialization_error: Option<String>,
+    timeout: Option<u64>,
+    max_redirects: Option<u32>,
+    max_retries: Option<u32>,
 }
 
 impl Fetch {
     override_methods!();
+
+    /// Maximum time in milliseconds (no limit by default; `0` also means
+    /// no limit).
+    pub fn timeout(mut self, timeout_ms: u64) -> Self {
+        self.timeout = Some(timeout_ms);
+        self
+    }
+
+    /// Maximum number of redirects to follow (default 20; `0` returns the
+    /// redirect response).
+    pub fn max_redirects(mut self, max: u32) -> Self {
+        self.max_redirects = Some(max);
+        self
+    }
+
+    /// Retries of the followed redirect requests on `ECONNRESET`
+    /// (default 0). The first request is the browser's own and is not
+    /// retried.
+    pub fn max_retries(mut self, max: u32) -> Self {
+        self.max_retries = Some(max);
+        self
+    }
+
+    /// Follow a redirect response with the context's request context.
+    async fn follow_redirect(
+        route: &Route,
+        response: APIResponse,
+        method: String,
+        max_redirects: u32,
+        max_retries: Option<u32>,
+    ) -> Result<APIResponse> {
+        let location = response
+            .headers
+            .iter()
+            .find(|h| h.name.eq_ignore_ascii_case("location"))
+            .map(|h| h.value.clone());
+        let Some(location) = location.filter(|l| !l.is_empty()) else {
+            return Ok(response);
+        };
+        let Ok(next) = url::Url::parse(&response.url).and_then(|u| u.join(&location)) else {
+            return Ok(response);
+        };
+        let page = route
+            .inner
+            .page
+            .upgrade()
+            .ok_or_else(Error::target_closed)?;
+        let status = response.status;
+        let method = if status == 303 || ((status == 301 || status == 302) && method == "POST") {
+            "GET".to_string()
+        } else {
+            method
+        };
+        let mut fetch = Page::from_inner(page)
+            .request()
+            .fetch(next.to_string())
+            .method(method)
+            .max_redirects(max_redirects - 1)
+            .fail_on_status_code(false);
+        for header in route.inner.request.inner.headers.iter() {
+            let name = header.name.to_ascii_lowercase();
+            if matches!(name.as_str(), "cookie" | "host" | "content-length") {
+                continue;
+            }
+            fetch = fetch.header(header.name.clone(), header.value.clone());
+        }
+        if let Some(retries) = max_retries {
+            fetch = fetch.max_retries(retries);
+        }
+        let api = fetch.await?;
+        let body = api.body().await?;
+        Ok(APIResponse {
+            url: api.url().to_string(),
+            status: api.status(),
+            status_text: api.status_text().to_string(),
+            headers: api
+                .headers_array()
+                .into_iter()
+                .map(|h| Header::new(h.name, h.value))
+                .collect(),
+            body,
+        })
+    }
 }
 
 impl IntoFuture for Fetch {
@@ -709,10 +801,38 @@ impl IntoFuture for Fetch {
             if let Some(e) = self.serialization_error {
                 return Err(Error::serialization(e).with_api("route.fetch"));
             }
-            self.route
-                .inner_fetch(self.overrides)
-                .await
-                .api("route.fetch")
+            let max_redirects = self.max_redirects.unwrap_or(20);
+            let max_retries = self.max_retries;
+            let method = self
+                .overrides
+                .method
+                .clone()
+                .unwrap_or_else(|| self.route.inner.request.method());
+            let route = self.route.clone();
+            let run = async move {
+                let response = route.inner_fetch(self.overrides).await?;
+                if max_redirects > 0 && (300..400).contains(&response.status) {
+                    return Fetch::follow_redirect(
+                        &route,
+                        response,
+                        method,
+                        max_redirects,
+                        max_retries,
+                    )
+                    .await;
+                }
+                Ok(response)
+            };
+            match self.timeout {
+                Some(ms) if ms > 0 => {
+                    match tokio::time::timeout(std::time::Duration::from_millis(ms), run).await {
+                        Ok(result) => result,
+                        Err(_) => Err(Error::timeout_exceeded(ms)),
+                    }
+                }
+                _ => run.await,
+            }
+            .api("route.fetch")
         })
     }
 }

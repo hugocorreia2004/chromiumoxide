@@ -442,7 +442,11 @@ async fn query_frames(
     strict: bool,
     parent_visible: bool,
 ) -> Result<Vec<(Frame, bool)>> {
-    let ctx = frame.utility_context().await?;
+    let ctx = if crate::selectors::needs_main_world(selector_string) {
+        frame.main_context().await?
+    } else {
+        frame.utility_context().await?
+    };
     let array = handle_of(
         call_injected(
             &ctx,
@@ -540,6 +544,8 @@ pub(crate) struct CallOptions {
 
 /// Result of [`call_on_selector`].
 pub(crate) struct CallResult {
+    /// The frame the selector resolved in.
+    pub(crate) frame: Frame,
     pub(crate) frame_visible: bool,
     pub(crate) result: Evaluated,
 }
@@ -578,7 +584,7 @@ pub(crate) async fn call_on_selector(
         frame_visible,
     } in resolved
     {
-        let world = if options.main_world {
+        let world = if options.main_world || crate::selectors::needs_main_world(&target.selector) {
             World::Main
         } else {
             World::Utility
@@ -660,6 +666,7 @@ pub(crate) async fn call_on_selector(
             ));
         }
         aggregated = Some(CallResult {
+            frame: resolved_frame.clone(),
             frame_visible,
             result: evaluated,
         });
@@ -690,13 +697,15 @@ pub(crate) async fn query(frame: &Frame, target: &SelectorTarget) -> Result<Opti
     adopt_to_main(element).await.map(Some)
 }
 
-/// Adopt an element handle to the main world of its frame.
+/// Adopt an element handle to the world `evaluate` runs in: the main world,
+/// or with `stealth` the isolated one, so evaluating on the element never
+/// runs automation code where the page can see it (like Patchright).
 pub(crate) async fn adopt_to_main(element: ElementHandle) -> Result<ElementHandle> {
     let frame = element
         .context()
         .frame()
         .ok_or_else(|| Error::frame_detached("Frame was detached"))?;
-    let main = frame.main_context().await?;
+    let main = frame.context(World::default_evaluate()).await?;
     if element.context().same_context(&main) {
         return Ok(element);
     }
@@ -782,7 +791,7 @@ pub(crate) async fn query_array_in_main_world(
         "({ elements }) => elements",
         CallArg::OptHandle(None),
         CallOptions {
-            main_world: true,
+            main_world: World::default_evaluate() == World::Main,
             ..Default::default()
         },
     )
@@ -790,7 +799,7 @@ pub(crate) async fn query_array_in_main_world(
     match resolved {
         Some(r) => handle_of(r.result),
         None => {
-            let ctx = frame.main_context().await?;
+            let ctx = frame.context(World::default_evaluate()).await?;
             handle_of(call_function(&ctx, "() => []", vec![], false).await?)
         }
     }

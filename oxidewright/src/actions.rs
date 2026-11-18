@@ -340,6 +340,27 @@ impl<const N: usize> From<[&str; N]> for InputFiles {
         Vec::from(v).into()
     }
 }
+impl From<Vec<String>> for InputFiles {
+    fn from(v: Vec<String>) -> Self {
+        if v.is_empty() {
+            return InputFiles::none();
+        }
+        InputFiles::Paths(v.into_iter().map(PathBuf::from).collect())
+    }
+}
+impl<const N: usize> From<[PathBuf; N]> for InputFiles {
+    fn from(v: [PathBuf; N]) -> Self {
+        if N == 0 {
+            return InputFiles::none();
+        }
+        InputFiles::Paths(v.into())
+    }
+}
+impl<const N: usize> From<[FilePayload; N]> for InputFiles {
+    fn from(v: [FilePayload; N]) -> Self {
+        InputFiles::Payloads(v.into())
+    }
+}
 impl From<FilePayload> for InputFiles {
     fn from(v: FilePayload) -> Self {
         InputFiles::Payloads(vec![v])
@@ -528,6 +549,16 @@ impl Target {
             None => explicit.unwrap_or(DEFAULT_TIMEOUT),
         }
     }
+
+    /// The browser of the target's page, for `slow_mo`.
+    fn browser(&self) -> Option<std::sync::Arc<crate::browser::BrowserInner>> {
+        let page = match self {
+            Target::Handle(h) => h.page_or_closed().ok(),
+            Target::Selector { frame, .. } => frame.page_inner(),
+            Target::Invalid(_) => None,
+        };
+        page.and_then(|p| p.browser.upgrade())
+    }
 }
 
 /// Options of every action (only the relevant ones are settable).
@@ -550,6 +581,8 @@ pub(crate) struct Opts {
     pub(crate) state: Option<WaitForSelectorState>,
     pub(crate) depth: Option<u32>,
     pub(crate) mode: Option<String>,
+    pub(crate) boxes: Option<bool>,
+    pub(crate) isolated: Option<bool>,
 }
 
 /// A serialized evaluation argument and the handles it references.
@@ -826,6 +859,12 @@ pub mod kinds {
         EvaluateHandle,
         /// `aria_snapshot`
         AriaSnapshot,
+        /// `aria_snapshot_json`
+        AriaSnapshotJson,
+        /// `locator.wait_for_function`
+        WaitForFunction,
+        /// `locator.drop`
+        Drop,
     );
 
     /// `evaluate` on a locator / `eval_on_selector`.
@@ -870,6 +909,7 @@ opts!(kinds::WaitForSelector: Strict, State);
 opts!(kinds::WaitFor: State);
 opts!(kinds::DragAndDrop: Force, Trial, NoWaitAfter, Strict, Steps);
 opts!(kinds::EvaluateHandle: Arg);
+opts!(kinds::WaitForFunction: Arg);
 impl<T> opt::Arg for kinds::Evaluate<T> {}
 impl<T> opt::Arg for kinds::EvaluateAll<T> {}
 impl<T> opt::Arg for kinds::EvalOnSelector<T> {}
@@ -896,18 +936,10 @@ impl Action<kinds::DragAndDrop> {
         self.opts.target_position = Some(position.into());
         self
     }
-}
 
-impl Action<kinds::AriaSnapshot> {
-    /// Maximum depth of the snapshot.
-    pub fn depth(mut self, depth: u32) -> Self {
-        self.opts.depth = Some(depth);
-        self
-    }
-
-    /// Snapshot mode, `"default"` or `"ai"`.
-    pub fn mode(mut self, mode: impl Into<String>) -> Self {
-        self.opts.mode = Some(mode.into());
+    /// `scroll: "none"` (`false`) skips scrolling the elements into view.
+    pub fn scroll(mut self, scroll: bool) -> Self {
+        self.opts.scroll_none = !scroll;
         self
     }
 }
@@ -940,6 +972,24 @@ pub type WaitForSelector = Action<kinds::WaitForSelector>;
 // ----------------------------------------------------------------------
 
 macro_rules! into_future {
+    // Actions Playwright slows down with `slowMo`.
+    (slow $kind:ty => $out:ty, |$a:ident| $body:expr) => {
+        impl IntoFuture for Action<$kind> {
+            type Output = Result<$out>;
+            type IntoFuture = BoxFuture<Result<$out>>;
+            fn into_future(self) -> Self::IntoFuture {
+                let $a = self;
+                let browser = $a.target.browser();
+                Box::pin(async move {
+                    let result = $body.await;
+                    if let Some(browser) = browser {
+                        browser.slow_mo().await;
+                    }
+                    result
+                })
+            }
+        }
+    };
     ($kind:ty => $out:ty, |$a:ident| $body:expr) => {
         impl IntoFuture for Action<$kind> {
             type Output = Result<$out>;
@@ -953,7 +1003,7 @@ macro_rules! into_future {
 }
 
 /// Run a task on the target with Playwright's progress semantics.
-async fn run_task<K>(
+pub(crate) async fn run_task<K>(
     action: Action<K>,
     task: Task,
     force: bool,
@@ -1006,7 +1056,7 @@ fn check_tap_target(action: &Action<kinds::Tap>) -> Result<()> {
     Ok(())
 }
 
-into_future!(kinds::Click => (), |a| async move {
+into_future!(slow kinds::Click => (), |a| async move {
     let options = pointer_options(&a.opts);
     let pointer = PointerAction {
         name: "click",
@@ -1024,7 +1074,7 @@ into_future!(kinds::Click => (), |a| async move {
     run_task(a, Task::Pointer(pointer, options), force, true).await.map(|_| ())
 });
 
-into_future!(kinds::Dblclick => (), |a| async move {
+into_future!(slow kinds::Dblclick => (), |a| async move {
     let options = pointer_options(&a.opts);
     let pointer = PointerAction {
         name: "dblclick",
@@ -1042,7 +1092,7 @@ into_future!(kinds::Dblclick => (), |a| async move {
     run_task(a, Task::Pointer(pointer, options), force, true).await.map(|_| ())
 });
 
-into_future!(kinds::Tap => (), |a| async move {
+into_future!(slow kinds::Tap => (), |a| async move {
     check_tap_target(&a)?;
     let options = pointer_options(&a.opts);
     let pointer = PointerAction {
@@ -1056,7 +1106,7 @@ into_future!(kinds::Tap => (), |a| async move {
     run_task(a, Task::Pointer(pointer, options), force, true).await.map(|_| ())
 });
 
-into_future!(kinds::Hover => (), |a| async move {
+into_future!(slow kinds::Hover => (), |a| async move {
     let options = pointer_options(&a.opts);
     let pointer = PointerAction {
         name: "hover",
@@ -1069,18 +1119,18 @@ into_future!(kinds::Hover => (), |a| async move {
     run_task(a, Task::Pointer(pointer, options), force, true).await.map(|_| ())
 });
 
-into_future!(kinds::Fill => (), |a| async move {
+into_future!(slow kinds::Fill => (), |a| async move {
     let task = Task::Fill { value: a.args.text.clone(), force: a.opts.force };
     let force = a.opts.force;
     run_task(a, task, force, true).await.map(|_| ())
 });
 
-into_future!(kinds::Type => (), |a| async move {
+into_future!(slow kinds::Type => (), |a| async move {
     let task = Task::Type { text: a.args.text.clone(), delay: a.opts.delay };
     run_task(a, task, false, false).await.map(|_| ())
 });
 
-into_future!(kinds::Press => (), |a| async move {
+into_future!(slow kinds::Press => (), |a| async move {
     let task = Task::Press {
         key: a.args.text.clone(),
         delay: a.opts.delay,
@@ -1089,13 +1139,13 @@ into_future!(kinds::Press => (), |a| async move {
     run_task(a, task, false, false).await.map(|_| ())
 });
 
-into_future!(kinds::SetChecked => (), |a| async move {
+into_future!(slow kinds::SetChecked => (), |a| async move {
     let task = Task::SetChecked { state: a.args.flag, options: pointer_options(&a.opts) };
     let force = a.opts.force;
     run_task(a, task, force, true).await.map(|_| ())
 });
 
-into_future!(kinds::SelectOption => Vec<String>, |a| async move {
+into_future!(slow kinds::SelectOption => Vec<String>, |a| async move {
     let (elements, values) = convert_select_values(&a.args.values);
     let task = Task::SelectOption { elements, values, force: a.opts.force };
     let force = a.opts.force;
@@ -1105,7 +1155,7 @@ into_future!(kinds::SelectOption => Vec<String>, |a| async move {
     }
 });
 
-into_future!(kinds::SelectText => (), |a| async move {
+into_future!(slow kinds::SelectText => (), |a| async move {
     let task = Task::SelectText { force: a.opts.force };
     let force = a.opts.force;
     with_element(a, move |handle, progress| async move {
@@ -1114,33 +1164,25 @@ into_future!(kinds::SelectText => (), |a| async move {
     .await
 });
 
-into_future!(kinds::SetInputFiles => (), |a| async move {
+into_future!(slow kinds::SetInputFiles => (), |a| async move {
     let files = a.args.files.clone().unwrap_or_else(InputFiles::none);
     let items = prepare_input_files(&files).map_err(|e| e.with_api(a.api))?;
     run_task(a, Task::SetInputFiles(items), false, false).await.map(|_| ())
 });
 
-into_future!(kinds::Focus => (), |a| async move {
+into_future!(slow kinds::Focus => (), |a| async move {
     run_task(a, Task::Focus, false, false).await.map(|_| ())
 });
 
-into_future!(kinds::Blur => (), |a| async move {
+into_future!(slow kinds::Blur => (), |a| async move {
     run_task(a, Task::Blur, false, false).await.map(|_| ())
 });
 
-into_future!(kinds::ScrollIntoView => (), |a| async move {
+into_future!(slow kinds::ScrollIntoView => (), |a| async move {
     with_element(a, |handle, progress| async move {
         handle.run_handle_task(&progress, &Task::ScrollIntoView).await.map(|_| ())
     }, false)
     .await
-});
-
-into_future!(kinds::AriaSnapshot => String, |a| async move {
-    let task = Task::AriaSnapshot { depth: a.opts.depth, mode: a.opts.mode.clone() };
-    match run_task(a, task, false, false).await? {
-        TaskOutput::Text(s) => Ok(s),
-        _ => Ok(String::new()),
-    }
 });
 
 /// `Locator._withElement`: resolve the element (strict, attached), run
@@ -1217,7 +1259,7 @@ fn to_opt_string(value: JsValue) -> Option<String> {
     }
 }
 
-into_future!(kinds::DispatchEvent => (), |a| async move {
+into_future!(slow kinds::DispatchEvent => (), |a| async move {
     let mut a = a;
     let api = a.api;
     let init = a.args.arg.take_arg().map_err(|e| e.with_api(api))?;
@@ -1354,7 +1396,7 @@ into_future!(kinds::ElementHandle => ElementHandle, |a| async move {
     }).await
 });
 
-into_future!(kinds::DragAndDrop => (), |a| async move {
+into_future!(slow kinds::DragAndDrop => (), |a| async move {
     let Target::Selector { frame, selector, strict } = a.target.clone() else {
         return Err(Error::invalid_argument("drag_and_drop requires selectors").with_api(a.api));
     };
@@ -1370,7 +1412,7 @@ into_future!(kinds::DragAndDrop => (), |a| async move {
         position: a.opts.source_position,
         trial,
         modifiers: None,
-        scroll_none: false,
+        scroll_none: a.opts.scroll_none,
     };
     let target_options = PointerOptions {
         position: a.opts.target_position,
@@ -1769,6 +1811,39 @@ impl ElementHandle {
 // Frame / Page selector API
 // ----------------------------------------------------------------------
 
+/// Builder returned by query_selector of [Page](crate::Page) /
+/// [Frame]; .await it.
+#[must_use = "builders do nothing unless awaited"]
+pub struct QuerySelector {
+    frame: Frame,
+    selector: String,
+    strict: bool,
+    api: &'static str,
+}
+
+impl QuerySelector {
+    /// Fail when the selector matches more than one element.
+    pub fn strict(mut self, strict: bool) -> Self {
+        self.strict = strict;
+        self
+    }
+}
+
+impl IntoFuture for QuerySelector {
+    type Output = Result<Option<ElementHandle>>;
+    type IntoFuture = BoxFuture<Result<Option<ElementHandle>>>;
+    fn into_future(self) -> Self::IntoFuture {
+        Box::pin(async move {
+            query(
+                &self.frame,
+                &SelectorTarget::new(self.selector, self.strict),
+            )
+            .await
+            .map_err(|e| e.with_api(self.api))
+        })
+    }
+}
+
 macro_rules! selector_api {
     ($ty:ty, $prefix:literal, $frame:ident => $get_frame:expr) => {
         impl $ty {
@@ -1987,13 +2062,18 @@ macro_rules! selector_api {
                     .with_text(expression)
             }
 
-            /// The first element matching `selector` (`$`), without waiting.
-            pub async fn query_selector(&self, selector: &str) -> Result<Option<ElementHandle>> {
+            /// The first element matching selector ($), without waiting.
+            /// Builder: .strict(true) fails when several elements match;
+            /// .await it.
+            pub fn query_selector(&self, selector: &str) -> QuerySelector {
                 let $frame = self;
                 let frame: Frame = $get_frame;
-                query(&frame, &SelectorTarget::new(selector, false))
-                    .await
-                    .map_err(|e| e.with_api(concat!($prefix, ".$")))
+                QuerySelector {
+                    frame,
+                    selector: selector.to_string(),
+                    strict: false,
+                    api: concat!($prefix, ".$"),
+                }
             }
 
             /// All elements matching `selector` (`$$`).

@@ -17,10 +17,11 @@ use chromiumoxide::cdp::js_protocol::runtime::{
 };
 
 use crate::events::Event;
-use crate::execution_context::{ContextTarget, ExecutionContext, World};
+use crate::execution_context::{ContextSession, ContextTarget, ExecutionContext, World};
 use crate::js_handle::JSHandle;
 use crate::network_manager::emit_on_context;
 use crate::page::{Page, PageInner};
+use crate::worker::Worker;
 
 /// Location of a console message.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -41,6 +42,7 @@ pub struct ConsoleMessage {
 
 struct ConsoleInner {
     page: Option<Page>,
+    worker: Option<Worker>,
     kind: String,
     text: String,
     args: Vec<JSHandle>,
@@ -89,10 +91,16 @@ impl ConsoleMessage {
     pub fn timestamp(&self) -> f64 {
         self.inner.timestamp
     }
+
+    /// The worker that produced the message, if any.
+    pub fn worker(&self) -> Option<Worker> {
+        self.inner.worker.clone()
+    }
 }
 
-/// An uncaught exception of a page (`pageerror`).
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// An uncaught exception of a page (`pageerror`). Equality compares the
+/// error (name, message and stack).
+#[derive(Clone, Debug)]
 pub struct WebError {
     /// The error name, e.g. `Error` or `TypeError`.
     pub name: String,
@@ -100,6 +108,28 @@ pub struct WebError {
     pub message: String,
     /// The stack, as formatted by the browser.
     pub stack: String,
+    location: ConsoleMessageLocation,
+    page: Option<Page>,
+}
+
+impl PartialEq for WebError {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name && self.message == other.message && self.stack == other.stack
+    }
+}
+
+impl Eq for WebError {}
+
+impl WebError {
+    /// Where the error was thrown (the top frame of its stack).
+    pub fn location(&self) -> &ConsoleMessageLocation {
+        &self.location
+    }
+
+    /// The page that produced the error.
+    pub fn page(&self) -> Option<Page> {
+        self.page.clone()
+    }
 }
 
 impl fmt::Display for WebError {
@@ -151,6 +181,13 @@ pub(crate) fn on_context_created(page: &PageInner, ev: &EventExecutionContextCre
 
 /// `Runtime.consoleAPICalled`.
 pub(crate) fn on_console_api(page: &PageInner, ev: &EventConsoleApiCalled) {
+    if page
+        .ext
+        .state
+        .skip_typed_runtime_event("Runtime.consoleAPICalled")
+    {
+        return;
+    }
     if *ev.execution_context_id.inner() == 0 {
         // Messages replayed for contexts that no longer exist.
         return;
@@ -188,6 +225,7 @@ pub(crate) fn on_console_api(page: &PageInner, ev: &EventConsoleApiCalled) {
     let message = ConsoleMessage {
         inner: Arc::new(ConsoleInner {
             page: page.self_weak.upgrade().map(Page::from_inner),
+            worker: None,
             kind: ev.r#type.as_ref().to_string(),
             text,
             args,
@@ -195,6 +233,7 @@ pub(crate) fn on_console_api(page: &PageInner, ev: &EventConsoleApiCalled) {
             timestamp: *ev.timestamp.inner(),
         }),
     };
+    page.ext.state.add_console(message.clone());
     emit_on_context(page, Event::Console(message));
 }
 
@@ -250,14 +289,119 @@ pub(crate) fn exception_to_error(details: &ExceptionDetails) -> WebError {
         name,
         message,
         stack,
+        location: ConsoleMessageLocation::default(),
+        page: None,
     }
 }
 
 /// `Runtime.exceptionThrown`.
 pub(crate) fn on_exception(page: &PageInner, ev: &EventExceptionThrown) {
-    let error = exception_to_error(&ev.exception_details);
+    if page
+        .ext
+        .state
+        .skip_typed_runtime_event("Runtime.exceptionThrown")
+    {
+        return;
+    }
+    let mut error = exception_to_error(&ev.exception_details);
+    error.location = location_of(ev.exception_details.stack_trace.as_ref());
+    error.page = page.self_weak.upgrade().map(Page::from_inner);
+    page.ext.state.add_error(error.clone());
     page.ext.listeners.emit(Event::PageError(error.clone()));
     if let Some(context) = page.context.upgrade() {
         context.ext.listeners.emit(Event::PageError(error));
+    }
+}
+
+/// `Runtime` console/exception events of a child session, tagged with the
+/// session by chromiumoxide (see
+/// [`chromiumoxide::handler::target::CHILD_SESSION_RUNTIME_EVENT`]).
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ChildSessionRuntimeEvent {
+    session_id: String,
+    method: String,
+    params: serde_json::Value,
+}
+
+impl chromiumoxide::types::MethodType for ChildSessionRuntimeEvent {
+    fn method_id() -> chromiumoxide::types::MethodId {
+        chromiumoxide::handler::target::CHILD_SESSION_RUNTIME_EVENT.into()
+    }
+}
+
+impl chromiumoxide::cdp::CustomEvent for ChildSessionRuntimeEvent {}
+
+/// A child-session `Runtime` event: worker consoles and errors are reported
+/// here (with their worker); the typed event that follows is skipped.
+/// Out-of-process frames keep going through the typed handlers.
+pub(crate) fn on_child_session_event(page: &PageInner, ev: &ChildSessionRuntimeEvent) {
+    let worker = page
+        .ext
+        .workers
+        .lock()
+        .unwrap()
+        .get(&ev.session_id)
+        .cloned();
+    let Some(worker) = worker else {
+        return;
+    };
+    page.ext.state.skip_next_typed_runtime_event(&ev.method);
+    let page_handle = page.self_weak.upgrade().map(Page::from_inner);
+    match ev.method.as_str() {
+        "Runtime.consoleAPICalled" => {
+            let Ok(event) = serde_json::from_value::<EventConsoleApiCalled>(ev.params.clone())
+            else {
+                return;
+            };
+            let context = ExecutionContext::new(
+                std::sync::Weak::new(),
+                World::Main,
+                ContextSession::Worker {
+                    browser: page.browser.clone(),
+                    session: worker.session_id().clone(),
+                },
+                ContextTarget::Id(event.execution_context_id),
+            );
+            let args: Vec<JSHandle> = event
+                .args
+                .iter()
+                .map(|arg| JSHandle::from_remote_quiet(context.clone(), arg.clone()))
+                .collect();
+            let text = args
+                .iter()
+                .map(|a| a.to_string())
+                .collect::<Vec<_>>()
+                .join(" ");
+            let message = ConsoleMessage {
+                inner: Arc::new(ConsoleInner {
+                    page: page_handle,
+                    worker: Some(worker.clone()),
+                    kind: event.r#type.as_ref().to_string(),
+                    text,
+                    args,
+                    location: location_of(event.stack_trace.as_ref()),
+                    timestamp: *event.timestamp.inner(),
+                }),
+            };
+            page.ext.state.add_console(message.clone());
+            worker.emit_console(message.clone());
+            emit_on_context(page, Event::Console(message));
+        }
+        "Runtime.exceptionThrown" => {
+            let Ok(event) = serde_json::from_value::<EventExceptionThrown>(ev.params.clone())
+            else {
+                return;
+            };
+            let mut error = exception_to_error(&event.exception_details);
+            error.location = location_of(event.exception_details.stack_trace.as_ref());
+            error.page = page_handle;
+            page.ext.state.add_error(error.clone());
+            page.ext.listeners.emit(Event::PageError(error.clone()));
+            if let Some(context) = page.context.upgrade() {
+                context.ext.listeners.emit(Event::PageError(error));
+            }
+        }
+        _ => {}
     }
 }

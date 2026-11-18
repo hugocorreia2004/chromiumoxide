@@ -104,7 +104,8 @@ cargo run -p oxidewright --example locators_forms
 What oxidewright never sends:
 
 * `Runtime.enable`, `Log.enable`, `Performance.enable` (also not by chromiumoxide with the
-  `stealth` feature), and no `Runtime.addBinding` (no `expose_function`).
+  `stealth` feature). `Runtime.addBinding` is sent only by `expose_function`/`expose_binding`
+  (with the user's name, like Patchright) and by `route_web_socket` (`__pwWebSocketBinding`).
 * No utility world created at attach. Execution contexts are created on demand with
   `Page.createIsolatedWorld` (random name), cached per frame and dropped on navigation or
   detach. The selector engine and actions run in that isolated world, which shares the DOM
@@ -135,7 +136,7 @@ Opt-in features that **are** detectable when you enable them:
 
 | Area | Status |
 |---|---|
-| `chromium().launch()` / `connect_over_cdp()` | Implemented. Missing: `launch_persistent_context` (use `.user_data_dir(..)`), `connect`, `launch_server` |
+| `chromium().launch()` / `connect_over_cdp()` | Implemented, with `launch_persistent_context`. Missing: `connect`, `launch_server` |
 | Browser, BrowserContext, Page, Frame | Implemented (navigation, lifecycle incl. `networkidle`, frames incl. out-of-process iframes, init scripts, tags, `close` with reason) |
 | Locators, `get_by_*`, FrameLocator, filters, strict mode | Implemented |
 | Actions (click, fill, press, check, select, upload, drag, ...) with actionability checks | Implemented |
@@ -152,8 +153,64 @@ Opt-in features that **are** detectable when you enable them:
 | Video | Implemented with an external `ffmpeg` (`OXIDEWRIGHT_FFMPEG_PATH` or `PATH`) |
 | Clock, coverage, CDP sessions, selectors (`set_test_id_attribute`) | Implemented (`selectors().register` missing) |
 | Workers | Partial: `evaluate` (JSON values), no `evaluate_handle` |
-| Assertions (`expect`) | Coming |
+| Assertions (`expect`) | Implemented: locator, page and API response matchers incl. `to_match_aria_snapshot` and `to_have_screenshot`; no soft assertions, `expect.poll` or `toPass` (see [Assertions](#assertions-expect)) |
 | Missing | `wait_for_function`, `wait_for_timeout`, `expose_function`/`expose_binding`, `add_locator_handler`, `route_web_socket`, service workers, `pause`, `page.aria_snapshot`, intercepting the very first request of a popup or out-of-process iframe |
+
+## Assertions (`expect`)
+
+`oxidewright::expect` ports Playwright Test's web-first assertions (without the test runner).
+They retry until they pass or the timeout expires (5 s by default, see
+`expect::set_default_timeout`), running the injected script's own `expect()` like Playwright does:
+
+```rust,ignore
+use oxidewright::expect::expect;
+use oxidewright::regex;
+
+expect(&page.get_by_role("button")).to_be_visible().await?;
+expect(&page.locator("#status")).not().to_have_text("Loading").timeout(1_000).await?;
+expect(&page.locator("li")).to_have_text(["one", "two"]).await?;   // one entry per element
+expect(&page.locator("h1")).to_contain_text(regex("welcome", "i")).await?;
+expect(&page).to_have_url("/done").await?;                          // resolved against base_url
+expect(&page).message("should be on the home page").to_have_title("Home").await?;
+expect(&page.request().get(url).await?).to_be_ok().await?;
+```
+
+* Locators: `to_be_attached`, `to_be_checked` (`.checked(..)`, `.indeterminate(..)`),
+  `to_be_disabled`, `to_be_editable`, `to_be_empty`, `to_be_enabled`, `to_be_focused`,
+  `to_be_hidden`, `to_be_in_viewport` (`.ratio(..)`), `to_be_visible`, `to_contain_text`,
+  `to_have_text` (`.use_inner_text(..)`, `.ignore_case(..)`; a string, a regex or a list),
+  `to_have_accessible_name` / `_description` / `_error_message`, `to_have_attribute(name, value)`,
+  `to_have_attribute_present(name)`, `to_have_class`, `to_contain_class`, `to_have_count`,
+  `to_have_css` (`.pseudo(..)`), `to_have_id`, `to_have_js_property`, `to_have_role`,
+  `to_have_value`, `to_have_values`, `to_match_aria_snapshot`, `to_have_screenshot`.
+* Pages: `to_have_title`, `to_have_url` (string or regex, `.ignore_case(..)`),
+  `to_have_url_matching(predicate)`, `to_match_aria_snapshot`, `to_have_screenshot`.
+* API responses (`page.request()` / `route.fetch()` responses): `to_be_ok`.
+* Failures are `Error::Expect(MatcherResult)` (name, pass, expected, actual, log, timeout, ARIA
+  snapshot) and the message mirrors Playwright's, diffs included:
+
+  ```text
+  expect(locator).toHaveText(expected) failed
+
+  Locator:  locator('#node')
+  Expected: "hey"
+  Received: "Text content"
+  Timeout:  1000ms
+
+  Call log:
+    - Expect "toHaveText" locator('#node') with timeout 1000ms
+    - waiting for locator('#node')
+    -   locator resolved to <div id="node">Text content</div>
+    -   unexpected value "Text content"
+  ```
+
+Differences with Playwright Test: no soft assertions, `expect.poll`, `expect.extend`, `toPass`,
+`AbortSignal` (drop the future instead) or `URLPattern`. ARIA snapshot templates are parsed with
+`yaml-rust2`, so YAML syntax errors are worded differently. `to_have_screenshot` compares
+with a PNG at an explicit path using Playwright's `pixelmatch` comparator (`threshold`,
+`max_diff_pixels`, `max_diff_pixel_ratio`); a missing file is written and the assertion fails,
+and `-actual.png` / `-diff.png` files are written next to it on mismatch. The `ssim-cie94`
+comparator, snapshot path templates and `--update-snapshots` modes are not ported.
 
 ## Updating the bundled scripts
 

@@ -2,17 +2,15 @@
 //! `Page.setInterceptFileChooserDialog` while someone listens for them.
 
 use std::fmt;
-use std::path::PathBuf;
 use std::sync::Arc;
 
-use chromiumoxide::cdp::browser_protocol::dom::{
-    BackendNodeId, ResolveNodeParams, SetFileInputFilesParams,
-};
+use chromiumoxide::cdp::browser_protocol::dom::ResolveNodeParams;
 use chromiumoxide::cdp::browser_protocol::page::{
     EventFileChooserOpened, FileChooserOpenedMode, SetInterceptFileChooserDialogParams,
 };
 
-use crate::error::{Error, Result, ResultExt};
+use crate::actions::{InputFiles, SetInputFiles};
+use crate::error::{Error, Result};
 use crate::events::{Event, EventKind};
 use crate::js_handle::{ElementHandle, JSHandle};
 use crate::page::{Page, PageInner};
@@ -26,7 +24,6 @@ pub struct FileChooser {
 struct FileChooserInner {
     page: Page,
     element: ElementHandle,
-    backend_node_id: BackendNodeId,
     multiple: bool,
 }
 
@@ -54,42 +51,56 @@ impl FileChooser {
         self.inner.page.clone()
     }
 
-    /// Select files (paths are made absolute). An empty list clears the
-    /// selection.
-    pub async fn set_files(
-        &self,
-        files: impl IntoIterator<Item = impl Into<PathBuf>>,
-    ) -> Result<()> {
-        async {
-            let files: Vec<PathBuf> = files.into_iter().map(Into::into).collect();
-            if files.len() > 1 && !self.inner.multiple {
-                return Err(Error::invalid_argument(
-                    "Non-multiple file input can only accept single file",
-                ));
+    /// Select files: local paths or in-memory [`crate::FilePayload`]s (see
+    /// [`InputFiles`]); an empty list clears the selection. Same as
+    /// `chooser.element().set_input_files(files)`, with its options:
+    /// `.timeout(ms)` and `.no_wait_after(bool)` before `.await`.
+    pub fn set_files(&self, files: impl Into<InputFiles>) -> SetFiles {
+        let files = files.into();
+        let count = match &files {
+            InputFiles::Paths(p) => p.len(),
+            InputFiles::Payloads(p) => p.len(),
+        };
+        let error = (count > 1 && !self.inner.multiple).then(|| {
+            Error::invalid_argument("Non-multiple file input can only accept single file")
+        });
+        let mut action = self.inner.element.set_input_files(files);
+        action.api = "fileChooser.setFiles";
+        SetFiles { action, error }
+    }
+}
+
+/// Builder returned by [`FileChooser::set_files`]; `.await` it.
+#[must_use = "builders do nothing unless awaited"]
+pub struct SetFiles {
+    action: SetInputFiles,
+    error: Option<Error>,
+}
+
+impl SetFiles {
+    /// Maximum time in milliseconds (default: the page's default timeout).
+    pub fn timeout(mut self, timeout_ms: u64) -> Self {
+        self.action = self.action.timeout(timeout_ms);
+        self
+    }
+
+    /// Accepted for Playwright compatibility (deprecated there, no effect).
+    pub fn no_wait_after(mut self, no_wait_after: bool) -> Self {
+        self.action = self.action.no_wait_after(no_wait_after);
+        self
+    }
+}
+
+impl std::future::IntoFuture for SetFiles {
+    type Output = Result<()>;
+    type IntoFuture = std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send>>;
+    fn into_future(self) -> Self::IntoFuture {
+        Box::pin(async move {
+            if let Some(error) = self.error {
+                return Err(error.with_api("fileChooser.setFiles"));
             }
-            let mut paths = Vec::new();
-            for file in files {
-                let absolute = if file.is_absolute() {
-                    file
-                } else {
-                    std::env::current_dir()
-                        .map_err(|e| Error::invalid_argument(e.to_string()))?
-                        .join(file)
-                };
-                paths.push(absolute.to_string_lossy().into_owned());
-            }
-            let mut params = SetFileInputFilesParams::new(paths);
-            params.backend_node_id = Some(self.inner.backend_node_id);
-            self.inner
-                .element
-                .as_js_handle()
-                .context()
-                .send(params)
-                .await
-                .map(|_| ())
-        }
-        .await
-        .api("fileChooser.setFiles")
+            self.action.await
+        })
     }
 }
 
@@ -139,7 +150,6 @@ pub(crate) fn on_file_chooser_opened(page: &PageInner, ev: &EventFileChooserOpen
             inner: Arc::new(FileChooserInner {
                 page: Page::from_inner(page_arc.clone()),
                 element,
-                backend_node_id,
                 multiple,
             }),
         };

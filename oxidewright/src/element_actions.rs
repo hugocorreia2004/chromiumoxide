@@ -29,6 +29,7 @@ use crate::input::{KeyboardModifier, MouseButton};
 use crate::js::JsValue;
 use crate::js_handle::{ElementHandle, JSHandle};
 use crate::page::{PageEvent, PageInner};
+use crate::page_state::perform_action_pre_checks;
 use crate::progress::Progress;
 
 /// Result of one attempt of an action (`PerformActionResult`).
@@ -111,6 +112,11 @@ pub(crate) enum Perform {
     MoveAndUp {
         steps: u32,
     },
+    /// `ElementHandle._drop`: file payloads and `{ mimeType, value }` entries.
+    Drop {
+        payloads: Vec<Value>,
+        data: Vec<Value>,
+    },
 }
 
 /// Mirrors `PointerAction` of dom.ts.
@@ -119,9 +125,8 @@ pub(crate) struct PointerAction {
     pub(crate) name: &'static str,
     pub(crate) wait_for_enabled: bool,
     pub(crate) wait_after: WaitAfter,
-    /// Skips `page.performActionPreChecks` (locator handlers), which
-    /// oxidewright does not implement yet; kept to mirror dom.ts.
-    #[allow(dead_code)]
+    /// Skips `page.performActionPreChecks` (navigation check and locator
+    /// handlers), like dom.ts.
     pub(crate) skip_action_pre_checks: bool,
     pub(crate) perform: Perform,
 }
@@ -182,6 +187,9 @@ pub(crate) enum Task {
     AriaSnapshot {
         depth: Option<u32>,
         mode: Option<String>,
+        boxes: Option<bool>,
+        /// Return the JSON tree instead of the YAML text.
+        json: bool,
     },
 }
 
@@ -192,6 +200,7 @@ pub(crate) enum TaskOutput {
     NotConnected,
     Values(Vec<String>),
     Text(String),
+    Value(JsValue),
 }
 
 impl TaskOutput {
@@ -521,6 +530,10 @@ impl ElementHandle {
                 }
             } else {
                 progress.log(format!("attempting {action_name} action{trial_suffix}"));
+            }
+            if !force && !kind.skips_action_pre_checks() {
+                let page = self.page_or_closed()?;
+                perform_action_pre_checks(&page, progress).await?;
             }
             let result = self.attempt(progress, kind, retry).await?;
             retry += 1;
@@ -862,6 +875,26 @@ impl ElementHandle {
                         .mouse_move(point.x, point.y, *steps, false)
                         .await?;
                     page.input.mouse_up(MouseButton::Left, 1).await?;
+                }
+                Perform::Drop { payloads, data } => {
+                    let result = self
+                        .eval_in_utility(
+                            crate::drop_action::DROP_JS,
+                            json!({ "payloads": payloads, "data": data, "point": { "x": point.x, "y": point.y } }),
+                        )
+                        .await?;
+                    match result {
+                        None => return Ok(Outcome::NotConnected),
+                        Some(JsValue::String(s)) if s == "error:notconnected" => {
+                            return Ok(Outcome::NotConnected);
+                        }
+                        Some(JsValue::String(s)) if s == "not-accepted" => {
+                            return Err(non_recoverable(
+                                "Drop target did not accept the drop \u{2014} its dragover handler did not call preventDefault()",
+                            ));
+                        }
+                        _ => {}
+                    }
                 }
             }
             if let Some(restore) = restore {
@@ -1320,20 +1353,29 @@ impl ElementHandle {
                 )
                 .await?
             }
-            Task::AriaSnapshot { depth, mode } => {
+            Task::AriaSnapshot {
+                depth,
+                mode,
+                boxes,
+                json,
+            } => {
                 let mut options =
                     json!({ "mode": mode.clone().unwrap_or_else(|| "default".into()) });
                 if let Some(depth) = depth {
                     options["depth"] = json!(depth);
                 }
-                let result = self
-                    .eval_in_utility(
-                        "(injected, element, options) => injected.ariaSnapshot(element, options)",
-                        options,
-                    )
-                    .await?;
+                if let Some(boxes) = boxes {
+                    options["boxes"] = json!(boxes);
+                }
+                let function = if *json {
+                    "(injected, element, options) => injected.ariaSnapshotJSON(element, options).json"
+                } else {
+                    "(injected, element, options) => injected.ariaSnapshot(element, options)"
+                };
+                let result = self.eval_in_utility(function, options).await?;
                 return Ok(match result {
                     None => TaskOutput::NotConnected,
+                    Some(v) if *json => TaskOutput::Value(v),
                     Some(v) => TaskOutput::Text(v.as_str().unwrap_or_default().to_string()),
                 });
             }
@@ -1352,6 +1394,19 @@ impl ElementHandle {
             TaskOutput::NotConnected => Err(not_attached()),
             other => Ok(other),
         }
+    }
+}
+
+impl Task {
+    /// Whether the task opts out of `performActionPreChecks`.
+    fn skips_action_pre_checks(&self) -> bool {
+        matches!(self, Task::Pointer(action, _) if action.skip_action_pre_checks)
+    }
+}
+
+impl RetryKind<'_> {
+    fn skips_action_pre_checks(&self) -> bool {
+        matches!(self, RetryKind::Pointer { action, .. } if action.skip_action_pre_checks)
     }
 }
 
@@ -1439,11 +1494,16 @@ pub(crate) async fn retry_with_progress_if_not_connected(
         "waiting for {}",
         describe_selector(&target.selector)
     ));
+    let pre_checks = !force && !task.skips_action_pre_checks();
     let wait_for_frame_visible = wait_for_frame_visible && !force;
     let mut backoff = Backoff::new(progress.timeout());
     loop {
         backoff.wait().await;
         let attempt = async {
+            if pre_checks {
+                let page = frame.page_inner().ok_or_else(Error::target_closed)?;
+                perform_action_pre_checks(&page, progress).await?;
+            }
             let resolved = call_on_selector(
                 frame,
                 target,
@@ -1670,6 +1730,10 @@ pub(crate) async fn wait_for_selector(
             }
         }
         let attempt = async {
+            if log {
+                let page = frame.page_inner().ok_or_else(Error::target_closed)?;
+                perform_action_pre_checks(&page, progress).await?;
+            }
             let resolved = call_on_selector(
                 frame,
                 target,

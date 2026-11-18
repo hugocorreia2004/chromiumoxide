@@ -32,6 +32,9 @@ base64 = "0.22"
 fastrand = "2"
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "gzip", "brotli", "deflate", "http2"] }
 sha1_smol = "1"
+yaml-rust2 = { version = "0.10", default-features = false }
+png = "0.17"
+ring = "0.17"
 
 [features]
 default = ["stealth"]
@@ -42,6 +45,8 @@ stealth = ["chromiumoxide/stealth"]
 
 [dev-dependencies]
 axum = { version = "0.8", features = ["ws"] }
+rustls = "0.23"
+tokio-rustls = "0.26"
 tokio = { version = "1", features = ["full"] }
 
 [[test]]

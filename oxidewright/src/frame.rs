@@ -309,6 +309,13 @@ impl Frame {
         }
     }
 
+    /// The execution context of `world` if it exists already.
+    pub(crate) fn existing_context(&self, world: World) -> Option<ExecutionContext> {
+        self.inner.contexts.lock().unwrap()[world.index()]
+            .clone()
+            .filter(|c| !c.is_destroyed())
+    }
+
     /// The execution context of `world`, created on demand.
     pub(crate) async fn context(&self, world: World) -> Result<ExecutionContext> {
         let index = world.index();
@@ -331,6 +338,12 @@ impl Frame {
             let generation = self.inner.context_gen.load(Ordering::SeqCst);
             match self.create_context(world).await {
                 Ok(ctx) => {
+                    if world == World::Main {
+                        // Exposed bindings, per context like Patchright
+                        // (`Runtime.addBinding` only reaches new documents
+                        // with `Runtime.enable`).
+                        crate::binding::on_main_context(self, &ctx).await;
+                    }
                     if generation == self.inner.context_gen.load(Ordering::SeqCst) {
                         self.inner.contexts.lock().unwrap()[index] = Some(ctx.clone());
                         return Ok(ctx);
@@ -467,7 +480,7 @@ impl Frame {
             frame: self.clone(),
             expression: expression.into(),
             arg: Ok(None),
-            world: World::Main,
+            world: World::default_evaluate(),
             api: "frame.evaluate",
             _marker: PhantomData,
         }
@@ -479,7 +492,7 @@ impl Frame {
             frame: self.clone(),
             expression: expression.into(),
             arg: Ok(None),
-            world: World::Main,
+            world: World::default_evaluate(),
             api: "frame.evaluateHandle",
         }
     }
@@ -522,12 +535,10 @@ impl Frame {
     }
 
     /// The full HTML contents of the frame, including the doctype.
-    pub async fn content(&self) -> Result<String> {
-        self.utility_evaluate(
-            "() => { let retVal = ''; if (document.doctype) retVal = new XMLSerializer().serializeToString(document.doctype); if (document.documentElement) retVal += document.documentElement.outerHTML; return retVal; }",
-        )
-        .await
-        .map_err(|e| e.with_api("frame.content"))
+    /// Builder: `.include_shadow(true)` also serializes open shadow roots;
+    /// `.await` it.
+    pub fn content(&self) -> crate::page_tools::Content {
+        crate::page_tools::Content::new(self.clone(), "frame.content")
     }
 
     /// The `<iframe>`/`<frame>` element hosting this frame.
@@ -768,7 +779,9 @@ impl Frame {
                                 )));
                             }
                             if let Some(error) = nav.error {
-                                return Err(Error::navigation(error));
+                                // A page closing aborts its navigation
+                                // (ERR_ABORTED) just before it is seen closed.
+                                return Err(self.closed_or(Error::navigation(error)).await);
                             }
                             break nav;
                         }
@@ -1079,7 +1092,8 @@ impl IntoFuture for Goto {
     type Output = Result<Option<Response>>;
     type IntoFuture = BoxFuture<Result<Option<Response>>>;
     fn into_future(self) -> Self::IntoFuture {
-        Box::pin(async move {
+        let slow = self.frame.page_inner().and_then(|p| p.browser.upgrade());
+        Box::pin(crate::browser::with_slow_mo(slow, async move {
             let timeout = self.frame.timeout_settings_navigation(self.timeout);
             let progress = Progress::new(self.api, timeout);
             let wait_until = self.wait_until.unwrap_or_default();
@@ -1089,7 +1103,7 @@ impl IntoFuture for Goto {
                         .goto_impl(&progress, self.url, wait_until, self.referer),
                 )
                 .await
-        })
+        }))
     }
 }
 

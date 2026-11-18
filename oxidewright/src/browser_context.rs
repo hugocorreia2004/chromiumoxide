@@ -35,6 +35,8 @@ pub struct NewContextOptions {
     pub offline: bool,
     /// Credentials for HTTP authentication.
     pub http_credentials: Option<crate::HttpCredentials>,
+    /// Proxy of this context's requests (overrides the browser's).
+    pub proxy: Option<crate::ProxySettings>,
     /// Ignore HTTPS errors.
     pub ignore_https_errors: bool,
     /// Accept downloads (default `true`).
@@ -107,6 +109,7 @@ impl NewContextOptions {
             extra_http_headers: Vec::new(),
             offline: false,
             http_credentials: None,
+            proxy: None,
             ignore_https_errors: false,
             accept_downloads: true,
             record_har: None,
@@ -152,6 +155,11 @@ pub(crate) struct ContextInner {
     init_scripts: Mutex<Vec<String>>,
     closed: AtomicBool,
     pub(crate) emu: crate::ext::ContextExt,
+    /// The page of `browser.new_page()` owning this context.
+    owner_page: Mutex<Option<Weak<PageInner>>>,
+    /// The browser of a persistent context, kept alive by it (the caller
+    /// only holds the context); released when the browser closes.
+    kept_browser: Mutex<Option<Browser>>,
 }
 
 impl fmt::Debug for BrowserContext {
@@ -194,6 +202,8 @@ impl BrowserContext {
                 init_scripts: Mutex::new(Vec::new()),
                 closed: AtomicBool::new(false),
                 emu: Default::default(),
+                owner_page: Mutex::new(None),
+                kept_browser: Mutex::new(None),
             }),
         }
     }
@@ -234,16 +244,52 @@ impl BrowserContext {
         opener: Option<Weak<PageInner>>,
     ) -> Result<Page> {
         let browser = self.browser_inner()?;
+        let target_id = cdp.target_id().as_ref().to_string();
+        if let Some(inner) = browser.page_by_target(&target_id) {
+            return Ok(Page::from_inner(inner));
+        }
+        // `new_page` and the target listener may both adopt the same page:
+        // the first one does it, the other gets the same page.
+        let cell = browser.adoption_cell(&target_id);
+        let result = cell
+            .get_or_try_init(|| self.adopt_page_once(cdp, opener))
+            .await
+            .cloned();
+        browser.finish_adoption(&target_id);
+        result
+    }
+
+    async fn adopt_page_once(
+        &self,
+        cdp: chromiumoxide::Page,
+        opener: Option<Weak<PageInner>>,
+    ) -> Result<Page> {
+        let browser = self.browser_inner()?;
+        let scripts = self.inner.init_scripts.lock().unwrap().clone();
+        let scripts_installed = crate::emulation::preconfigure_new_page(&cdp, self, &scripts).await;
         let inner = PageInner::attach(cdp, Arc::downgrade(&browser), self).await?;
         *inner.ext.opener.lock().unwrap() = opener;
         let page = Page::from_inner(inner);
         crate::emulation::init_page(&page).await?;
         crate::screencast::on_page_created(&page).await?;
-        let scripts = self.inner.init_scripts.lock().unwrap().clone();
-        for script in scripts {
-            page.inner.add_init_script_source(script).await?;
+        crate::binding::init_page(&page, self).await?;
+        crate::credentials::init_page(&page, self).await?;
+        if !scripts_installed {
+            for script in scripts {
+                page.inner.add_init_script_source_with(script, true).await?;
+            }
         }
         crate::page_ext::initialize(&page, self).await?;
+        // New pages and popups start paused (`wait_for_debugger_on_start`):
+        // everything above now applies to their first document. A no-op for
+        // a page that was not paused.
+        let _ = page
+            .inner
+            .cdp
+            .execute(
+                chromiumoxide::cdp::js_protocol::runtime::RunIfWaitingForDebuggerParams::default(),
+            )
+            .await;
         browser.remember_page(&page);
         self.inner.pages.lock().unwrap().push(page.clone());
         self.inner
@@ -258,6 +304,9 @@ impl BrowserContext {
         async {
             if self.inner.closed.load(Ordering::SeqCst) {
                 return Err(Error::target_closed());
+            }
+            if self.inner.owner_page.lock().unwrap().is_some() {
+                return Err(Error::invalid_argument("Please use browser.newContext()"));
             }
             let browser = self.browser_inner()?;
             let mut params = CreateTargetParams::new("about:blank");
@@ -326,6 +375,46 @@ impl BrowserContext {
         }
     }
 
+    /// The context of `browser.new_page()` owned by `page`, if any.
+    pub(crate) fn owned_by(page: &Page) -> Option<BrowserContext> {
+        let context = page.context()?;
+        let owner = context.inner.owner_page.lock().unwrap().clone()?;
+        std::ptr::eq(owner.as_ptr(), Arc::as_ptr(&page.inner)).then(|| context.clone())
+    }
+
+    /// Whether this is the persistent context of
+    /// `launch_persistent_context` (closing it closes the browser).
+    fn is_persistent(&self) -> bool {
+        self.inner.id.is_none()
+            && self
+                .inner
+                .browser
+                .upgrade()
+                .is_some_and(|b| b.persistent.load(Ordering::SeqCst))
+    }
+
+    /// Keep the browser of a persistent context alive.
+    pub(crate) fn keep_browser(&self, browser: Browser) {
+        *self.inner.kept_browser.lock().unwrap() = Some(browser);
+    }
+
+    /// The browser closed: close the context without talking to it.
+    pub(crate) fn did_close_with_browser(&self) {
+        let kept = self.inner.kept_browser.lock().unwrap().take();
+        drop(kept);
+        if self.inner.closed.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let pages = std::mem::take(&mut *self.inner.pages.lock().unwrap());
+        for page in &pages {
+            page.inner.did_close();
+        }
+        if let Some(browser) = self.inner.browser.upgrade() {
+            browser.forget_context(self);
+        }
+        self.emit_closed();
+    }
+
     pub(crate) async fn close_impl(&self) -> Result<()> {
         crate::video::on_context_closing(self).await;
         async {
@@ -333,6 +422,15 @@ impl BrowserContext {
                 return Ok(());
             }
             let har = crate::har::flush_context(self).await;
+            if self.is_persistent() {
+                // Like Playwright, closing the persistent context closes the
+                // browser (which closes this context).
+                if let Some(browser) = self.browser() {
+                    browser.close().await?;
+                }
+                self.did_close_with_browser();
+                return har;
+            }
             if self.inner.closed.swap(true, Ordering::SeqCst) {
                 return Ok(());
             }
@@ -367,7 +465,8 @@ impl BrowserContext {
 /// Builder returned by [`crate::Browser::new_context`]; `.await` it.
 #[must_use = "builders do nothing unless awaited"]
 pub struct NewContext {
-    pub(crate) browser: Browser,
+    /// `None` for the context options of `launch_persistent_context`.
+    pub(crate) browser: Option<Browser>,
     pub(crate) options: NewContextOptions,
 }
 
@@ -397,17 +496,233 @@ impl IntoFuture for NewContext {
     fn into_future(self) -> Self::IntoFuture {
         Box::pin(async move {
             async {
+                let browser = self.browser.ok_or_else(Error::target_closed)?;
                 crate::emulation::validate_options(&self.options)?;
                 crate::video::validate_options(&self.options)?;
-                let context = self.browser.inner.create_context(self.options).await?;
+                let context = browser.inner.create_context(self.options).await?;
                 if let Err(err) = crate::emulation::init_context(&context).await {
                     let _ = context.close().await;
                     return Err(err);
                 }
+                browser
+                    .inner
+                    .listeners
+                    .emit(crate::events::Event::Context(context.clone()));
                 Ok(context)
             }
             .await
             .api("browser.newContext")
         })
+    }
+}
+
+/// Builder returned by [`crate::Browser::new_page`]; `.await` it. Takes every
+/// option of [`NewContext`].
+#[must_use = "builders do nothing unless awaited"]
+pub struct NewPage {
+    pub(crate) context: NewContext,
+}
+
+impl IntoFuture for NewPage {
+    type Output = Result<Page>;
+    type IntoFuture = BoxFuture<Result<Page>>;
+    fn into_future(self) -> Self::IntoFuture {
+        Box::pin(async move {
+            let context = self
+                .context
+                .await
+                .map_err(|e| e.with_api("browser.newPage"))?;
+            let page = match context.new_page().await {
+                Ok(page) => page,
+                Err(err) => {
+                    let _ = context.close().await;
+                    return Err(err.with_api("browser.newPage"));
+                }
+            };
+            *context.inner.owner_page.lock().unwrap() = Some(Arc::downgrade(&page.inner));
+            Ok(page)
+        })
+    }
+}
+
+/// The builder methods of [`NewContext`] on a builder with a `NewContext`
+/// field, so `browser.new_page()` and `launch_persistent_context()` take
+/// every context option.
+macro_rules! forward_context_options {
+    ($field:ident) => {
+        /// Viewport of every page; `None` disables viewport emulation.
+        pub fn viewport(mut self, viewport: Option<$crate::ViewportSize>) -> Self {
+            self.$field = self.$field.viewport(viewport);
+            self
+        }
+        /// Base URL used to resolve relative URLs.
+        pub fn base_url(mut self, base_url: impl Into<String>) -> Self {
+            self.$field = self.$field.base_url(base_url);
+            self
+        }
+        /// Replace all context options at once.
+        pub fn context_options(mut self, options: $crate::NewContextOptions) -> Self {
+            self.$field = self.$field.options(options);
+            self
+        }
+        /// Extra HTTP headers sent with every request.
+        pub fn extra_http_headers<K: Into<String>, V: Into<String>>(
+            mut self,
+            headers: impl IntoIterator<Item = (K, V)>,
+        ) -> Self {
+            self.$field = self.$field.extra_http_headers(headers);
+            self
+        }
+        /// Emulate a disconnected network.
+        pub fn offline(mut self, offline: bool) -> Self {
+            self.$field = self.$field.offline(offline);
+            self
+        }
+        /// Credentials for HTTP authentication.
+        pub fn http_credentials(mut self, credentials: $crate::HttpCredentials) -> Self {
+            self.$field = self.$field.http_credentials(credentials);
+            self
+        }
+        /// Ignore HTTPS errors (self-signed certificates, ...).
+        pub fn ignore_https_errors(mut self, ignore: bool) -> Self {
+            self.$field = self.$field.ignore_https_errors(ignore);
+            self
+        }
+        /// Whether downloads are accepted (default `true`).
+        pub fn accept_downloads(mut self, accept: bool) -> Self {
+            self.$field = self.$field.accept_downloads(accept);
+            self
+        }
+        /// Record a HAR file of the context, written when it closes.
+        pub fn record_har(mut self, record_har: $crate::RecordHar) -> Self {
+            self.$field = self.$field.record_har(record_har);
+            self
+        }
+        /// Report `console` and `pageerror` events (not stealthy, see
+        /// [`crate::NewContext::console_events`]).
+        pub fn console_events(mut self, enabled: bool) -> Self {
+            self.$field = self.$field.console_events(enabled);
+            self
+        }
+        /// Emulate a device (see [`crate::devices`]).
+        pub fn device(mut self, device: &$crate::Device) -> Self {
+            self.$field = self.$field.device(device);
+            self
+        }
+        /// Screen size exposed to pages (`window.screen`).
+        pub fn screen(mut self, screen: impl Into<$crate::ViewportSize>) -> Self {
+            self.$field = self.$field.screen(screen);
+            self
+        }
+        /// Device scale factor (`window.devicePixelRatio`).
+        pub fn device_scale_factor(mut self, factor: f64) -> Self {
+            self.$field = self.$field.device_scale_factor(factor);
+            self
+        }
+        /// Emulate a mobile device.
+        pub fn is_mobile(mut self, is_mobile: bool) -> Self {
+            self.$field = self.$field.is_mobile(is_mobile);
+            self
+        }
+        /// Emulate touch support.
+        pub fn has_touch(mut self, has_touch: bool) -> Self {
+            self.$field = self.$field.has_touch(has_touch);
+            self
+        }
+        /// User agent override.
+        pub fn user_agent(mut self, user_agent: impl Into<String>) -> Self {
+            self.$field = self.$field.user_agent(user_agent);
+            self
+        }
+        /// Locale, e.g. `de-DE`.
+        pub fn locale(mut self, locale: impl Into<String>) -> Self {
+            self.$field = self.$field.locale(locale);
+            self
+        }
+        /// Timezone, e.g. `Europe/Lisbon`.
+        pub fn timezone_id(mut self, timezone_id: impl Into<String>) -> Self {
+            self.$field = self.$field.timezone_id(timezone_id);
+            self
+        }
+        /// Emulated geolocation.
+        pub fn geolocation(mut self, geolocation: $crate::emulation::Geolocation) -> Self {
+            self.$field = self.$field.geolocation(geolocation);
+            self
+        }
+        /// Permissions granted to every origin.
+        pub fn permissions<I, S>(mut self, permissions: I) -> Self
+        where
+            I: IntoIterator<Item = S>,
+            S: Into<String>,
+        {
+            self.$field = self.$field.permissions(permissions);
+            self
+        }
+        /// `prefers-color-scheme`.
+        pub fn color_scheme(mut self, value: $crate::emulation::ColorScheme) -> Self {
+            self.$field = self.$field.color_scheme(value);
+            self
+        }
+        /// `prefers-reduced-motion`.
+        pub fn reduced_motion(mut self, value: $crate::emulation::ReducedMotion) -> Self {
+            self.$field = self.$field.reduced_motion(value);
+            self
+        }
+        /// `forced-colors`.
+        pub fn forced_colors(mut self, value: $crate::emulation::ForcedColors) -> Self {
+            self.$field = self.$field.forced_colors(value);
+            self
+        }
+        /// `prefers-contrast`.
+        pub fn contrast(mut self, value: $crate::emulation::Contrast) -> Self {
+            self.$field = self.$field.contrast(value);
+            self
+        }
+        /// `false` disables JavaScript.
+        pub fn java_script_enabled(mut self, enabled: bool) -> Self {
+            self.$field = self.$field.java_script_enabled(enabled);
+            self
+        }
+        /// Bypass the page's Content-Security-Policy.
+        pub fn bypass_csp(mut self, bypass: bool) -> Self {
+            self.$field = self.$field.bypass_csp(bypass);
+            self
+        }
+        /// Make locators strict by default.
+        pub fn strict_selectors(mut self, strict: bool) -> Self {
+            self.$field = self.$field.strict_selectors(strict);
+            self
+        }
+        /// Whether pages may register service workers.
+        pub fn service_workers(mut self, policy: $crate::emulation::ServiceWorkerPolicy) -> Self {
+            self.$field = self.$field.service_workers(policy);
+            self
+        }
+        /// Initial cookies and storage.
+        pub fn storage_state(mut self, state: impl Into<$crate::StorageStateSource>) -> Self {
+            self.$field = self.$field.storage_state(state);
+            self
+        }
+        /// Record a video of every page into `dir` (requires ffmpeg).
+        pub fn record_video_dir(mut self, dir: impl Into<std::path::PathBuf>) -> Self {
+            self.$field = self.$field.record_video_dir(dir);
+            self
+        }
+        /// Size of the recorded videos.
+        pub fn record_video_size(mut self, size: impl Into<$crate::ViewportSize>) -> Self {
+            self.$field = self.$field.record_video_size(size);
+            self
+        }
+    };
+}
+pub(crate) use forward_context_options;
+
+impl NewPage {
+    forward_context_options!(context);
+
+    /// Proxy of the page's context (overrides the browser's).
+    pub fn proxy(mut self, proxy: crate::ProxySettings) -> Self {
+        self.context = self.context.proxy(proxy);
+        self
     }
 }

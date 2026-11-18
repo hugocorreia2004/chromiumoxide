@@ -23,8 +23,8 @@ use chromiumoxide::cdp::browser_protocol::target::{
     EventAttachedToTarget, EventDetachedFromTarget, EventTargetCreated,
 };
 use chromiumoxide::cdp::js_protocol::runtime::{
-    EnableParams as RuntimeEnableParams, EventConsoleApiCalled, EventExceptionThrown,
-    EventExecutionContextCreated,
+    EnableParams as RuntimeEnableParams, EventBindingCalled, EventConsoleApiCalled,
+    EventExceptionThrown, EventExecutionContextCreated,
 };
 use chromiumoxide::cdp::{Event as CdpEvent, IntoEventKind};
 use chromiumoxide::listeners::EventListenerRequest;
@@ -63,7 +63,13 @@ pub(crate) struct PageExt {
     pub(crate) file_chooser_intercepted: AtomicBool,
     /// Requests linked to their redirect (cycles broken on close).
     pub(crate) redirects: Mutex<Vec<Weak<crate::network::RequestInner>>>,
+    /// History, locator handlers and highlights (see `page_state.rs`).
+    pub(crate) state: crate::page_state::PageState,
     initialized: AtomicBool,
+    /// `expose_function` / `expose_binding` of the page.
+    pub(crate) bindings: crate::binding::Bindings,
+    /// `route_web_socket` handlers of the page.
+    pub(crate) ws_routes: crate::web_socket_route::WsRoutes,
 }
 
 impl Default for PageExt {
@@ -81,7 +87,10 @@ impl Default for PageExt {
             console_contexts: Mutex::new(HashMap::new()),
             file_chooser_intercepted: AtomicBool::new(false),
             redirects: Mutex::new(Vec::new()),
+            state: Default::default(),
             initialized: AtomicBool::new(false),
+            bindings: Default::default(),
+            ws_routes: Default::default(),
         }
     }
 }
@@ -123,6 +132,8 @@ pub(crate) async fn subscribe(
     one::<EventExceptionThrown>(cdp, tx).await?;
     one::<EventExecutionContextCreated>(cdp, tx).await?;
     one::<EventAttachedToTarget>(cdp, tx).await?;
+    one::<crate::console::ChildSessionRuntimeEvent>(cdp, tx).await?;
+    one::<EventBindingCalled>(cdp, tx).await?;
     Ok(())
 }
 
@@ -164,10 +175,12 @@ pub(crate) fn handle_event(page: &PageInner, any: AnyArc) {
         EventJavascriptDialogClosed => |p: &PageInner, _ev: Arc<EventJavascriptDialogClosed>| dialog::on_dialog_closed(p),
         EventFileChooserOpened => |p: &PageInner, ev: Arc<EventFileChooserOpened>| file_chooser::on_file_chooser_opened(p, &ev),
         EventTargetCrashed => |p: &PageInner, _ev: Arc<EventTargetCrashed>| on_crashed(p),
+        crate::console::ChildSessionRuntimeEvent => |p: &PageInner, ev: Arc<crate::console::ChildSessionRuntimeEvent>| crate::console::on_child_session_event(p, &ev),
         EventConsoleApiCalled => |p: &PageInner, ev: Arc<EventConsoleApiCalled>| crate::console::on_console_api(p, &ev),
         EventExceptionThrown => |p: &PageInner, ev: Arc<EventExceptionThrown>| crate::console::on_exception(p, &ev),
         EventExecutionContextCreated => |p: &PageInner, ev: Arc<EventExecutionContextCreated>| crate::console::on_context_created(p, &ev),
         EventAttachedToTarget => |p: &PageInner, ev: Arc<EventAttachedToTarget>| worker::on_attached(p, &ev),
+        EventBindingCalled => |p: &PageInner, ev: Arc<EventBindingCalled>| crate::binding::on_binding_called(p, &ev),
         EventDetachedFromTarget => |p: &PageInner, ev: Arc<EventDetachedFromTarget>| worker::on_detached(p, ev.session_id.as_ref()),
     );
 }
@@ -185,9 +198,13 @@ pub(crate) fn did_close(page: &PageInner) {
     page.ext.network.close(page);
     websocket::close_all(page);
     worker::close_all(page);
+    page.ext.state.did_close();
     if let Some(inner) = page.self_weak.upgrade() {
         let page = Page::from_inner(inner);
         page.inner.ext.listeners.emit(Event::Close(page.clone()));
+        if let Some(context) = page.inner.context.upgrade() {
+            context.ext.listeners.emit(Event::PageClose(page.clone()));
+        }
     }
 }
 
@@ -250,8 +267,10 @@ async fn configure_child_session(
 ) {
     NetworkManager::add_session(page, session.clone()).await;
     if console {
-        let _ = network_manager::send(page, Some(session), RuntimeEnableParams::default()).await;
+        let _ = network_manager::send(page, Some(session.clone()), RuntimeEnableParams::default())
+            .await;
     }
+    crate::binding::on_child_session(page, session).await;
 }
 
 /// Turn the frame tree notifications into public events.
@@ -289,8 +308,9 @@ async fn forward_page_events(
                 if let Some(frame) = page.frame_by_id(&nav.frame_id) {
                     if nav.new_document.is_some() {
                         watch_session(&page, &frame);
+                        crate::binding::on_new_document(&page, &frame);
                     }
-                    page.ext.listeners.emit(Event::FrameNavigated(frame));
+                    emit_frame(&page, Event::FrameNavigated(frame));
                 }
             }
             PageEvent::Lifecycle(id, state) => {
@@ -303,6 +323,7 @@ async fn forward_page_events(
                     LoadState::Load => {
                         page.ext.listeners.emit(Event::Load(p.clone()));
                         if let Some(context) = page.context.upgrade() {
+                            context.ext.listeners.emit(Event::PageLoad(p.clone()));
                             context.ext.har_page_event(&p, true);
                         }
                     }
@@ -353,6 +374,7 @@ fn watch_session(page: &Arc<PageInner>, frame: &Frame) {
 
 /// Adopt popups (targets with an opener) into the opener's context.
 pub(crate) async fn start_target_listener(inner: &Arc<BrowserInner>, cdp: &chromiumoxide::Browser) {
+    crate::service_worker::start_listener(inner, cdp).await;
     let Ok(mut created) = cdp.event_listener::<EventTargetCreated>().await else {
         return;
     };
@@ -363,11 +385,23 @@ pub(crate) async fn start_target_listener(inner: &Arc<BrowserInner>, cdp: &chrom
             if info.r#type != "page" {
                 continue;
             }
-            let Some(opener_id) = info.opener_id.clone() else {
-                continue;
-            };
             let Some(browser) = weak.upgrade() else {
                 break;
+            };
+            // New pages start paused until adopted and configured; one that
+            // nobody adopts (a context we do not own, a failed adoption) must
+            // not stay paused forever.
+            tokio::spawn(resume_if_not_adopted(
+                Arc::downgrade(&browser),
+                info.target_id.clone(),
+            ));
+            let Some(opener_id) = info.opener_id.clone() else {
+                // Like Playwright, every page of a known context is reported
+                // (e.g. `target=_blank rel=noopener` links).
+                let target_id = info.target_id.clone();
+                let context_id = info.browser_context_id.clone();
+                tokio::spawn(adopt_new_page(browser, target_id, context_id));
+                continue;
             };
             let target_id = info.target_id.clone();
             tokio::spawn(async move {
@@ -375,6 +409,53 @@ pub(crate) async fn start_target_listener(inner: &Arc<BrowserInner>, cdp: &chrom
             });
         }
     });
+}
+
+async fn adopt_new_page(
+    browser: Arc<BrowserInner>,
+    target_id: chromiumoxide::cdp::browser_protocol::target::TargetId,
+    context_id: Option<chromiumoxide::cdp::browser_protocol::browser::BrowserContextId>,
+) {
+    let Some(context) = browser.context_for_cdp_context(context_id.as_ref()) else {
+        return;
+    };
+    let mut cdp_page = None;
+    for _ in 0..250 {
+        if browser.page_by_target(target_id.as_ref()).is_some() {
+            return;
+        }
+        if let Ok(page) = browser.get_cdp_page(target_id.clone()).await {
+            cdp_page = Some(page);
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    let Some(cdp_page) = cdp_page else {
+        return;
+    };
+    if let Err(err) = context.adopt_page(cdp_page).await {
+        tracing::debug!("failed to adopt a new page: {err}");
+    }
+}
+
+async fn resume_if_not_adopted(
+    browser: std::sync::Weak<BrowserInner>,
+    target_id: chromiumoxide::cdp::browser_protocol::target::TargetId,
+) {
+    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+    let Some(browser) = browser.upgrade() else {
+        return;
+    };
+    if browser.page_by_target(target_id.as_ref()).is_some() {
+        return;
+    }
+    if let Ok(page) = browser.get_cdp_page(target_id).await {
+        let _ = page
+            .execute(
+                chromiumoxide::cdp::js_protocol::runtime::RunIfWaitingForDebuggerParams::default(),
+            )
+            .await;
+    }
 }
 
 async fn adopt_popup(

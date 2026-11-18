@@ -113,6 +113,9 @@ pub enum Error {
         /// Call log lines.
         log: Vec<String>,
     },
+    /// A web-first assertion of [`crate::expect`] failed.
+    #[error("{}", .0.message)]
+    Expect(Box<crate::expect::MatcherResult>),
     /// An error reported by the DevTools protocol layer.
     #[error("{}{source}", api.as_ref().map(|a| format!("{a}: ")).unwrap_or_default())]
     Protocol {
@@ -266,6 +269,7 @@ impl Error {
             | Error::Serialization { message, .. }
             | Error::Launch { message, .. } => message.clone(),
             Error::Protocol { source, .. } => source.to_string(),
+            Error::Expect(result) => result.message.clone(),
         }
     }
 
@@ -282,6 +286,7 @@ impl Error {
             | Error::Serialization { api, .. }
             | Error::Launch { api, .. }
             | Error::Protocol { api, .. } => api.as_deref(),
+            Error::Expect(_) => None,
         }
     }
 
@@ -298,6 +303,7 @@ impl Error {
             | Error::Serialization { log, .. }
             | Error::Launch { log, .. } => log,
             Error::Protocol { .. } => &[],
+            Error::Expect(result) => &result.log,
         }
     }
 
@@ -328,6 +334,7 @@ impl Error {
                     *api = Some(name.to_string());
                 }
             }
+            Error::Expect(_) => {}
         }
         self
     }
@@ -348,7 +355,7 @@ impl Error {
                     *log = lines;
                 }
             }
-            Error::Protocol { .. } => {}
+            Error::Protocol { .. } | Error::Expect(_) => {}
         }
         self
     }

@@ -28,6 +28,18 @@ pub(crate) struct ContextExt {
     pub(crate) offline: AtomicBool,
     pub(crate) http_credentials: Mutex<Option<HttpCredentials>>,
     pub(crate) har_recorders: Mutex<Vec<Arc<HarRecorder>>>,
+    /// `expose_function` / `expose_binding` of the context.
+    pub(crate) bindings: crate::binding::Bindings,
+    /// `route_web_socket` handlers of the context.
+    pub(crate) ws_routes: crate::web_socket_route::WsRoutes,
+    /// Routed WebSockets and their binding.
+    pub(crate) ws_state: crate::web_socket_route::WsContextState,
+    /// `context.credentials`.
+    pub(crate) credentials: crate::credentials::CredentialsState,
+    /// The recorder of `tracing.start_har`.
+    pub(crate) tracing_har: Mutex<Option<Arc<HarRecorder>>>,
+    /// `context.service_workers()`.
+    pub(crate) service_workers: crate::service_worker::ServiceWorkers,
 }
 
 impl ContextExt {
@@ -39,6 +51,12 @@ impl ContextExt {
             offline: AtomicBool::new(options.offline),
             http_credentials: Mutex::new(options.http_credentials.clone()),
             har_recorders: Mutex::new(Vec::new()),
+            bindings: Default::default(),
+            ws_routes: Default::default(),
+            ws_state: Default::default(),
+            credentials: Default::default(),
+            tracing_har: Mutex::new(None),
+            service_workers: Default::default(),
         }
     }
 
@@ -81,6 +99,15 @@ impl NewContext {
         self
     }
 
+    /// Proxy of this context's requests, overriding the browser's
+    /// ([`crate::Launch::proxy`]). `server` is `http://host:port`,
+    /// `socks5://host:port` or `host:port`; `bypass` is a comma-separated
+    /// list of hosts (`.example.com` matches subdomains).
+    pub fn proxy(mut self, proxy: crate::ProxySettings) -> Self {
+        self.options.proxy = Some(proxy);
+        self
+    }
+
     /// Ignore HTTPS errors (self-signed certificates, ...).
     pub fn ignore_https_errors(mut self, ignore: bool) -> Self {
         self.options.ignore_https_errors = ignore;
@@ -111,8 +138,9 @@ impl NewContext {
 impl BrowserContext {
     /// Call `handler` for every event of `kind` (context events: `page`,
     /// `close`, `request`, `response`, `requestfinished`, `requestfailed`,
-    /// `console`, `dialog`, `pageerror` (`weberror`), `download`,
-    /// `frameattached`, `framedetached`).
+    /// `console`, `dialog`, `dialogclosed`, `pageerror` (`weberror`),
+    /// `download`, `frameattached`, `framedetached`, `framenavigated`,
+    /// `pageclose`, `pageload`).
     pub fn on(
         &self,
         kind: EventKind,
@@ -156,6 +184,19 @@ impl BrowserContext {
         on_download, Download, Download, Download;
         /// `frameattached`.
         on_frame_attached, FrameAttached, FrameAttached, Frame;
+        /// `framedetached`.
+        on_frame_detached, FrameDetached, FrameDetached, Frame;
+        /// `framenavigated`: a frame of a page of the context navigated.
+        on_frame_navigated, FrameNavigated, FrameNavigated, Frame;
+        /// `pageclose`: a page of the context closed.
+        on_page_close, PageClose, PageClose, Page;
+        /// `pageload`: the `load` event fired in a page of the context.
+        on_page_load, PageLoad, PageLoad, Page;
+    }
+
+    /// Remove every handler of `kind` (all kinds when `None`).
+    pub fn remove_all_listeners(&self, kind: Option<EventKind>) {
+        self.inner.ext.listeners.remove_all(kind)
     }
 
     /// `close`: the context closed.

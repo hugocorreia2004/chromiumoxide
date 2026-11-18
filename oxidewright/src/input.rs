@@ -727,6 +727,18 @@ impl InputState {
         let _ = self.page.set(page);
     }
 
+    /// The `slow_mo` of the page's browser, after a public input call.
+    async fn slow_mo(&self) {
+        let browser = self
+            .page
+            .get()
+            .and_then(Weak::upgrade)
+            .and_then(|page| page.browser.upgrade());
+        if let Some(browser) = browser {
+            browser.slow_mo().await;
+        }
+    }
+
     async fn send<C: chromiumoxide::types::Command>(&self, cmd: C) -> Result<C::Response> {
         Ok(self.session.execute(cmd).await?.result)
     }
@@ -1286,6 +1298,12 @@ async fn sleep_ms(ms: f64) {
 // Public API
 // ----------------------------------------------------------------------
 
+/// Playwright's `slowMo`: wait after each public input call.
+async fn slowed<T>(input: &InputState, result: Result<T>) -> Result<T> {
+    input.slow_mo().await;
+    result
+}
+
 impl Page {
     fn input(&self) -> Arc<InputState> {
         self.inner.input.bind_page(Arc::downgrade(&self.inner));
@@ -1332,20 +1350,24 @@ impl fmt::Debug for Keyboard {
 impl Keyboard {
     /// Dispatch a `keydown` event (and `keypress`/`input` for printable keys).
     pub async fn down(&self, key: &str) -> Result<()> {
-        self.input.down(key).await.api("keyboard.down")
+        slowed(&self.input, self.input.down(key).await.api("keyboard.down")).await
     }
 
     /// Dispatch a `keyup` event.
     pub async fn up(&self, key: &str) -> Result<()> {
-        self.input.up(key).await.api("keyboard.up")
+        slowed(&self.input, self.input.up(key).await.api("keyboard.up")).await
     }
 
     /// Insert text without key events (only `input` is dispatched).
     pub async fn insert_text(&self, text: &str) -> Result<()> {
-        self.input
-            .insert_text(text)
-            .await
-            .api("keyboard.insertText")
+        slowed(
+            &self.input,
+            self.input
+                .insert_text(text)
+                .await
+                .api("keyboard.insertText"),
+        )
+        .await
     }
 
     /// Press a key or a combination (`down` then `up`).
@@ -1393,10 +1415,14 @@ impl IntoFuture for KeyboardPress {
     type IntoFuture = BoxFuture<Result<()>>;
     fn into_future(self) -> Self::IntoFuture {
         Box::pin(async move {
-            self.input
-                .press(&self.key, self.delay)
-                .await
-                .api("keyboard.press")
+            slowed(
+                &self.input,
+                self.input
+                    .press(&self.key, self.delay)
+                    .await
+                    .api("keyboard.press"),
+            )
+            .await
         })
     }
 }
@@ -1422,10 +1448,14 @@ impl IntoFuture for KeyboardType {
     type IntoFuture = BoxFuture<Result<()>>;
     fn into_future(self) -> Self::IntoFuture {
         Box::pin(async move {
-            self.input
-                .type_text(&self.text, self.delay)
-                .await
-                .api("keyboard.type")
+            slowed(
+                &self.input,
+                self.input
+                    .type_text(&self.text, self.delay)
+                    .await
+                    .api("keyboard.type"),
+            )
+            .await
         })
     }
 }
@@ -1504,10 +1534,14 @@ impl Mouse {
 
     /// Dispatch a `wheel` event at the current position.
     pub async fn wheel(&self, delta_x: impl Into<f64>, delta_y: impl Into<f64>) -> Result<()> {
-        self.input
-            .mouse_wheel(delta_x.into(), delta_y.into())
-            .await
-            .api("mouse.wheel")
+        slowed(
+            &self.input,
+            self.input
+                .mouse_wheel(delta_x.into(), delta_y.into())
+                .await
+                .api("mouse.wheel"),
+        )
+        .await
     }
 }
 
@@ -1533,10 +1567,14 @@ impl IntoFuture for MouseMove {
     type IntoFuture = BoxFuture<Result<()>>;
     fn into_future(self) -> Self::IntoFuture {
         Box::pin(async move {
-            self.input
-                .mouse_move(self.x, self.y, self.steps, false)
-                .await
-                .api("mouse.move")
+            slowed(
+                &self.input,
+                self.input
+                    .mouse_move(self.x, self.y, self.steps, false)
+                    .await
+                    .api("mouse.move"),
+            )
+            .await
         })
     }
 }
@@ -1570,15 +1608,23 @@ impl IntoFuture for MouseButtonAction {
     fn into_future(self) -> Self::IntoFuture {
         Box::pin(async move {
             if self.up {
-                self.input
-                    .mouse_up(self.button, self.click_count)
-                    .await
-                    .api("mouse.up")
+                slowed(
+                    &self.input,
+                    self.input
+                        .mouse_up(self.button, self.click_count)
+                        .await
+                        .api("mouse.up"),
+                )
+                .await
             } else {
-                self.input
-                    .mouse_down(self.button, self.click_count)
-                    .await
-                    .api("mouse.down")
+                slowed(
+                    &self.input,
+                    self.input
+                        .mouse_down(self.button, self.click_count)
+                        .await
+                        .api("mouse.down"),
+                )
+                .await
             }
         })
     }
@@ -1628,17 +1674,21 @@ impl IntoFuture for MouseClick {
     type IntoFuture = BoxFuture<Result<()>>;
     fn into_future(self) -> Self::IntoFuture {
         Box::pin(async move {
-            self.input
-                .mouse_click_with_steps(
-                    self.x,
-                    self.y,
-                    self.button,
-                    self.click_count,
-                    self.delay,
-                    self.steps,
-                )
-                .await
-                .api(self.api)
+            slowed(
+                &self.input,
+                self.input
+                    .mouse_click_with_steps(
+                        self.x,
+                        self.y,
+                        self.button,
+                        self.click_count,
+                        self.delay,
+                        self.steps,
+                    )
+                    .await
+                    .api(self.api),
+            )
+            .await
         })
     }
 }
@@ -1658,10 +1708,14 @@ impl fmt::Debug for Touchscreen {
 impl Touchscreen {
     /// Dispatch `touchstart` and `touchend` at `(x, y)`.
     pub async fn tap(&self, x: impl Into<f64>, y: impl Into<f64>) -> Result<()> {
-        self.input
-            .tap(x.into(), y.into())
-            .await
-            .api("touchscreen.tap")
+        slowed(
+            &self.input,
+            self.input
+                .tap(x.into(), y.into())
+                .await
+                .api("touchscreen.tap"),
+        )
+        .await
     }
 }
 

@@ -599,6 +599,9 @@ impl PageInner {
         }
         let current = data.current_document.clone();
         fx.invalidate.push(data.frame.clone());
+        if state.main.as_deref() == Some(id) {
+            self.ext.state.mark_navigation();
+        }
         self.clear_lifecycle_locked(state, id, fx);
         fx.events.push(PageEvent::Navigated(NavigationEvent {
             frame_id: id.to_string(),
@@ -812,6 +815,16 @@ impl PageInner {
     // ------------------------------------------------------------------
     // Network bookkeeping (navigation requests and network idleness)
     // ------------------------------------------------------------------
+
+    /// `pendingDocument()` of the main frame: `Some(url of its request)`
+    /// while a navigation of the main frame is pending.
+    pub(crate) fn main_pending_navigation(&self) -> Option<Option<String>> {
+        self.sync();
+        let state = self.tree.lock().unwrap();
+        let main = state.main.as_ref()?;
+        let pending = state.frames.get(main)?.pending_document.as_ref()?;
+        Some(pending.request.as_ref().map(|r| r.url()))
+    }
 
     /// `FrameManager.requestStarted` bookkeeping: in-flight requests,
     /// network idleness and the pending document of navigations.
@@ -1120,7 +1133,21 @@ impl PageInner {
         &self,
         source: String,
     ) -> Result<(Weak<PageInner>, ScriptIdentifier)> {
-        let params = AddScriptToEvaluateOnNewDocumentParams::new(source);
+        self.add_init_script_source_with(source, false).await
+    }
+
+    /// `run_immediately` also runs the script in the current document: used
+    /// while setting up a new page (like Playwright's `runImmediately`), so
+    /// a popup's initial `about:blank` gets the context's scripts too.
+    pub(crate) async fn add_init_script_source_with(
+        &self,
+        source: String,
+        run_immediately: bool,
+    ) -> Result<(Weak<PageInner>, ScriptIdentifier)> {
+        let mut params = AddScriptToEvaluateOnNewDocumentParams::new(source);
+        if run_immediately {
+            params.run_immediately = Some(true);
+        }
         let id = self.cdp.evaluate_on_new_document(params).await?;
         Ok((self.self_weak.clone(), id))
     }
@@ -1239,12 +1266,10 @@ impl Page {
             .map_err(|e| rename_api(e, "page.title"))
     }
 
-    /// The full HTML of the page.
-    pub async fn content(&self) -> Result<String> {
-        self.main_frame()
-            .content()
-            .await
-            .map_err(|e| rename_api(e, "page.content"))
+    /// The full HTML of the page. Builder: `.include_shadow(true)` also
+    /// serializes open shadow roots; `.await` it.
+    pub fn content(&self) -> crate::page_tools::Content {
+        crate::page_tools::Content::new(self.main_frame(), "page.content")
     }
 
     /// Replace the page's document with `html`.
@@ -1486,7 +1511,8 @@ impl IntoFuture for Reload {
     type Output = Result<Option<crate::Response>>;
     type IntoFuture = BoxFuture<Result<Option<crate::Response>>>;
     fn into_future(self) -> Self::IntoFuture {
-        Box::pin(async move {
+        let slow = self.page.inner.browser.upgrade();
+        Box::pin(crate::browser::with_slow_mo(slow, async move {
             let frame = self.page.main_frame();
             let mut wait = frame.wait_for_navigation().with_api("page.reload");
             if let Some(state) = self.wait_until {
@@ -1504,7 +1530,7 @@ impl IntoFuture for Reload {
                     .with_api("page.reload"));
             }
             wait.await
-        })
+        }))
     }
 }
 
@@ -1535,7 +1561,8 @@ impl IntoFuture for GoHistory {
     type Output = Result<Option<crate::Response>>;
     type IntoFuture = BoxFuture<Result<Option<crate::Response>>>;
     fn into_future(self) -> Self::IntoFuture {
-        Box::pin(async move {
+        let slow = self.page.inner.browser.upgrade();
+        Box::pin(crate::browser::with_slow_mo(slow, async move {
             let api = if self.delta < 0 {
                 "page.goBack"
             } else {
@@ -1568,7 +1595,7 @@ impl IntoFuture for GoHistory {
                 return Err(frame.closed_or(Error::from(e)).await.with_api(api));
             }
             wait.await
-        })
+        }))
     }
 }
 

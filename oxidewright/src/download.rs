@@ -26,6 +26,8 @@ const DENIED: &str = "Pass { acceptDownloads: true } when you are creating your 
 /// Download bookkeeping of a browser.
 pub(crate) struct BrowserDownloads {
     dir: Mutex<Option<PathBuf>>,
+    /// `downloads_path` of `launch`: kept when the browser closes.
+    user_dir: Mutex<Option<PathBuf>>,
     downloads: Mutex<HashMap<String, Download>>,
 }
 
@@ -33,6 +35,7 @@ impl Default for BrowserDownloads {
     fn default() -> Self {
         BrowserDownloads {
             dir: Mutex::new(None),
+            user_dir: Mutex::new(None),
             downloads: Mutex::new(HashMap::new()),
         }
     }
@@ -47,7 +50,16 @@ impl Drop for BrowserDownloads {
 }
 
 impl BrowserDownloads {
+    /// Use `dir` (created if needed) instead of a temporary directory.
+    pub(crate) fn set_user_dir(&self, dir: PathBuf) {
+        let _ = std::fs::create_dir_all(&dir);
+        *self.user_dir.lock().unwrap() = Some(dir);
+    }
+
     pub(crate) fn dir(&self) -> PathBuf {
+        if let Some(dir) = self.user_dir.lock().unwrap().clone() {
+            return dir;
+        }
         let mut dir = self.dir.lock().unwrap();
         if dir.is_none() {
             let name: String = std::iter::repeat_with(fastrand::alphanumeric)
@@ -175,6 +187,24 @@ impl Download {
         .api("download.saveAs")
     }
 
+    /// Wait for the download to finish and open the file for reading
+    /// (Playwright's `createReadStream`).
+    pub async fn create_read_stream(&self) -> Result<tokio::fs::File> {
+        async {
+            if !self.inner.accepted {
+                return Err(Error::invalid_argument(DENIED));
+            }
+            if let Some(failure) = self.finished().await {
+                return Err(Error::navigation(failure));
+            }
+            tokio::fs::File::open(&self.inner.path)
+                .await
+                .map_err(|e| Error::invalid_argument(e.to_string()))
+        }
+        .await
+        .api("download.createReadStream")
+    }
+
     /// Wait for the download to finish; `Some(error)` if it failed (e.g.
     /// `canceled`).
     pub async fn failure(&self) -> Result<Option<String>> {
@@ -215,9 +245,8 @@ impl Download {
 
 /// Apply the download behavior to a new context.
 pub(crate) async fn configure_context(context: &BrowserContext) -> Result<()> {
-    let Some(id) = context.inner.id.clone() else {
-        return Ok(());
-    };
+    // `None`: the default context (persistent or connected browsers).
+    let id = context.inner.id.clone();
     let browser = context
         .inner
         .browser
@@ -229,7 +258,7 @@ pub(crate) async fn configure_context(context: &BrowserContext) -> Result<()> {
     } else {
         SetDownloadBehaviorBehavior::Deny
     });
-    params.browser_context_id = Some(id);
+    params.browser_context_id = id;
     params.download_path = Some(browser.ext.downloads.dir().to_string_lossy().into_owned());
     params.events_enabled = Some(true);
     browser.execute_with_session(params, None).await.map(|_| ())

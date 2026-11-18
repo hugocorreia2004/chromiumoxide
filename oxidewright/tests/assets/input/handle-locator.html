@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Interstitial test</title>
+  <style>
+    #interstitial {
+      position: absolute;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      background: rgba(64, 64, 64, 0.5);
+      align-items: center;
+      justify-content: center;
+    }
+    #interstitial > div { position: absolute; top: 0; left: 0; width: 400px; height: 150px; }
+    #interstitial.hidden { display: none; }
+    #interstitial.visible { display: flex; }
+    #target-container { height: 100px; }
+    #target { width: 200px; height: 50px; }
+    #target:hover { background-color: rgb(255, 255, 0); }
+    #aside { margin-top: 300px; }
+  </style>
+</head>
+<body>
+  <div id="target-container"><button id="target">Click me</button></div>
+  <div id="aside">A place on the side to hover</div>
+  <div class="hidden" id="interstitial">
+    <div>This interstitial covers the button</div>
+    <button id="close">close</button>
+  </div>
+  <script>
+    // An annoying interstitial shown over the target, for locator handler
+    // tests: `setupAnnoyingInterstitial(event, times, capture)`.
+    //  - 'mouseover' / 'pointerover': shown on the event over the target,
+    //    `times` times (`capture` listens in the capture phase);
+    //  - 'none': shown right away, the close button hides it;
+    //  - 'remove': shown right away, the close button removes it;
+    //  - 'hide': shown right away, the close button hides it;
+    //  - 'timeout': shown right away, the close button hides it after 1s.
+    const target = document.getElementById('target');
+    const interstitial = document.getElementById('interstitial');
+    const closeButton = document.getElementById('close');
+    let mode = 'hide';
+    let listener = null;
+    let listenerEvent = null;
+    let listenerCapture = false;
+
+    target.addEventListener('click', () => {
+      window.clicked = (window.clicked || 0) + 1;
+    });
+
+    function show() {
+      if (!interstitial.isConnected)
+        document.body.appendChild(interstitial);
+      interstitial.classList.remove('hidden');
+      interstitial.classList.add('visible');
+    }
+
+    function hide() {
+      interstitial.classList.remove('visible');
+      interstitial.classList.add('hidden');
+    }
+
+    closeButton.addEventListener('click', () => {
+      if (mode === 'remove')
+        interstitial.remove();
+      else if (mode === 'timeout')
+        setTimeout(hide, 1000);
+      else
+        hide();
+    });
+
+    window.setupAnnoyingInterstitial = (event, times, capture) => {
+      if (listener)
+        target.removeEventListener(listenerEvent, listener, listenerCapture);
+      listener = null;
+      mode = event === 'remove' || event === 'timeout' ? event : 'hide';
+      if (event === 'mouseover' || event === 'pointerover') {
+        let remaining = times;
+        listenerEvent = event;
+        listenerCapture = capture === 'capture';
+        listener = () => {
+          if (remaining <= 0)
+            return;
+          remaining--;
+          show();
+        };
+        target.addEventListener(event, listener, listenerCapture);
+        return;
+      }
+      show();
+    };
+  </script>
+</body>
+</html>

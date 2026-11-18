@@ -32,6 +32,7 @@ struct DialogInner {
     message: String,
     default_value: String,
     handled: AtomicBool,
+    closed: AtomicBool,
 }
 
 impl fmt::Debug for Dialog {
@@ -84,7 +85,19 @@ impl Dialog {
         send(&page, Some(self.inner.session.clone()), params)
             .await
             .map(|_| ())
-            .api(api)
+            .api(api)?;
+        self.did_close(&page);
+        Ok(())
+    }
+
+    /// Emit `dialogclosed` once (after accept/dismiss, or when the browser
+    /// closed the dialog).
+    fn did_close(&self, page: &PageInner) {
+        if self.inner.closed.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        page.ext.dialogs.lock().unwrap().retain(|d| d != self);
+        emit_on_context(page, Event::DialogClosed(self.clone()));
     }
 
     /// Accept the dialog, with the text to enter in a `prompt`.
@@ -120,6 +133,7 @@ pub(crate) fn on_dialog_opening(page: &PageInner, ev: &EventJavascriptDialogOpen
             message: ev.message.clone(),
             default_value: ev.default_prompt.clone().unwrap_or_default(),
             handled: AtomicBool::new(false),
+            closed: AtomicBool::new(false),
         }),
     };
     let listeners = page.ext.listeners.count(EventKind::Dialog)
@@ -148,5 +162,59 @@ pub(crate) fn on_dialog_opening(page: &PageInner, ev: &EventJavascriptDialogOpen
 
 /// `Page.javascriptDialogClosed`.
 pub(crate) fn on_dialog_closed(page: &PageInner) {
-    page.ext.dialogs.lock().unwrap().clear();
+    let dialogs = std::mem::take(&mut *page.ext.dialogs.lock().unwrap());
+    for dialog in dialogs {
+        // Closed in the browser (possibly before `accept`/`dismiss` returned).
+        dialog.did_close(page);
+    }
+}
+
+impl Page {
+    /// `dialogclosed`: a dialog of the page was accepted or dismissed
+    /// (including the ones dismissed automatically).
+    pub fn on_dialog_closed(
+        &self,
+        handler: impl Fn(Dialog) + Send + Sync + 'static,
+    ) -> crate::events::ListenerId {
+        self.on(EventKind::DialogClosed, move |event| {
+            if let Event::DialogClosed(dialog) = event {
+                handler(dialog)
+            }
+        })
+    }
+
+    /// Wait for the next `dialogclosed` event of the page.
+    pub fn wait_for_dialog_closed(&self) -> crate::events::WaitForEvent<Dialog> {
+        crate::events::WaitForEvent::new(
+            crate::events::Emitter::Page(self.clone()),
+            EventKind::DialogClosed,
+            "page.waitForEvent",
+            crate::events::as_dialog_closed,
+        )
+    }
+}
+
+impl crate::BrowserContext {
+    /// `dialogclosed`: a dialog of a page of the context was accepted or
+    /// dismissed (including the ones dismissed automatically).
+    pub fn on_dialog_closed(
+        &self,
+        handler: impl Fn(Dialog) + Send + Sync + 'static,
+    ) -> crate::events::ListenerId {
+        self.on(EventKind::DialogClosed, move |event| {
+            if let Event::DialogClosed(dialog) = event {
+                handler(dialog)
+            }
+        })
+    }
+
+    /// Wait for the next `dialogclosed` event of the context.
+    pub fn wait_for_dialog_closed(&self) -> crate::events::WaitForEvent<Dialog> {
+        crate::events::WaitForEvent::new(
+            crate::events::Emitter::Context(self.clone()),
+            EventKind::DialogClosed,
+            "browserContext.waitForEvent",
+            crate::events::as_dialog_closed,
+        )
+    }
 }

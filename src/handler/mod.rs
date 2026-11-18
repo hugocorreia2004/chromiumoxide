@@ -16,6 +16,7 @@ use chromiumoxide_cdp::cdp::browser_protocol::page::{
 use chromiumoxide_cdp::cdp::browser_protocol::target::*;
 use chromiumoxide_cdp::cdp::events::CdpEvent;
 use chromiumoxide_cdp::cdp::events::CdpEventMessage;
+use chromiumoxide_cdp::cdp::js_protocol::runtime::RunIfWaitingForDebuggerParams;
 use chromiumoxide_types::{CallId, Error as ProtocolError, Message, Method, Response};
 use chromiumoxide_types::{MethodId, Request as CdpRequest};
 #[cfg(test)]
@@ -122,6 +123,19 @@ impl Handler {
             None,
             serde_json::to_value(discover).unwrap(),
         );
+        if config.wait_for_debugger_on_start {
+            let attach = SetAutoAttachParams::builder()
+                .auto_attach(true)
+                .wait_for_debugger_on_start(true)
+                .flatten(true)
+                .build()
+                .expect("auto-attach parameters are complete");
+            let _ = conn.submit_command(
+                attach.identifier(),
+                None,
+                serde_json::to_value(attach).unwrap(),
+            );
+        }
 
         let browser_contexts = config
             .context_ids
@@ -395,14 +409,32 @@ impl Handler {
                             let results = targets.clone();
                             for target_info in targets {
                                 let target_id = target_info.target_id.clone();
+                                // A known target is already attached (or attaching):
+                                // recreating it would start a second attach whose
+                                // session could replace the working one.
+                                if self.targets.contains_key(&target_id) {
+                                    continue;
+                                }
+                                let is_page = target_info.r#type == "page";
                                 let event: EventTargetCreated = EventTargetCreated { target_info };
                                 self.on_target_created(event);
-                                let attach = AttachToTargetParams::new(target_id);
-                                let _ = self.conn.submit_command(
-                                    attach.identifier(),
-                                    None,
-                                    serde_json::to_value(attach).unwrap(),
-                                );
+                                // Pages attach themselves (flattened) when polled.
+                                // Other targets get a flattened session too: a
+                                // non-flattened one cannot receive commands, and a
+                                // page given one never finished initializing.
+                                // With auto-attach the browser attaches them all.
+                                if !is_page && !self.config.wait_for_debugger_on_start {
+                                    let attach = AttachToTargetParams::builder()
+                                        .target_id(target_id)
+                                        .flatten(true)
+                                        .build()
+                                        .unwrap();
+                                    let _ = self.conn.submit_command(
+                                        attach.identifier(),
+                                        None,
+                                        serde_json::to_value(attach).unwrap(),
+                                    );
+                                }
                             }
 
                             let _ = tx.send(Ok(results)).ok();
@@ -1149,6 +1181,7 @@ impl Handler {
                 viewport: self.config.viewport.clone(),
                 request_intercept: self.config.request_intercept,
                 cache_enabled: self.config.cache_enabled,
+                wait_for_debugger_on_start: self.config.wait_for_debugger_on_start,
             },
             browser_ctx,
         );
@@ -1158,11 +1191,45 @@ impl Handler {
 
     /// A new session is attached to a target
     fn on_attached_to_target(&mut self, event: Box<EventAttachedToTarget>) {
+        if self.config.wait_for_debugger_on_start {
+            return self.on_auto_attached(event);
+        }
         let session = Session::new(event.session_id.clone(), event.target_info.target_id);
         if let Some(target) = self.targets.get_mut(session.target_id()) {
             target.set_session_id(session.session_id().clone())
         }
         self.sessions.insert(event.session_id, session);
+    }
+
+    /// A browser-level attach with `wait_for_debugger_on_start`: the
+    /// browser's own auto-attach, or an explicit attach of a caller.
+    fn on_auto_attached(&mut self, event: Box<EventAttachedToTarget>) {
+        let target_id = event.target_info.target_id.clone();
+        if !self.targets.contains_key(&target_id) && event.target_info.r#type != "browser" {
+            self.on_target_created(EventTargetCreated {
+                target_info: event.target_info.clone(),
+            });
+        }
+        let is_page = self
+            .targets
+            .get(&target_id)
+            .is_some_and(|target| target.is_page());
+        if let Some(target) = self.targets.get_mut(&target_id) {
+            target.on_auto_attached(event.session_id.clone(), event.waiting_for_debugger);
+        }
+        self.sessions.insert(
+            event.session_id.clone(),
+            Session::new(event.session_id.clone(), target_id),
+        );
+        // Only pages wait for their owner; anything else runs right away.
+        if event.waiting_for_debugger && !is_page {
+            let resume = RunIfWaitingForDebuggerParams::default();
+            let _ = self.conn.submit_command(
+                resume.identifier(),
+                Some(event.session_id.clone()),
+                serde_json::to_value(resume).unwrap(),
+            );
+        }
     }
 
     /// The session was detached from target.
@@ -1572,6 +1639,14 @@ pub struct HandlerConfig {
     pub request_intercept: bool,
     /// Whether to enable cache
     pub cache_enabled: bool,
+    /// Auto-attach to every new target at the browser level and keep it
+    /// paused on start (`Target.setAutoAttach` with `waitForDebuggerOnStart`,
+    /// like Playwright). Pages are handed over without waiting for their
+    /// first load and stay paused until the owner sends
+    /// `Runtime.runIfWaitingForDebugger` on the page's session, so popups and
+    /// new pages can be fully configured before their first document runs.
+    /// Other new targets (workers) are resumed right away.
+    pub wait_for_debugger_on_start: bool,
 }
 
 impl Default for HandlerConfig {
@@ -1584,6 +1659,7 @@ impl Default for HandlerConfig {
             request_timeout: Duration::from_millis(REQUEST_TIMEOUT),
             request_intercept: false,
             cache_enabled: true,
+            wait_for_debugger_on_start: false,
         }
     }
 }

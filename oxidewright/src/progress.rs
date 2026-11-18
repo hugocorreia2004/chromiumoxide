@@ -98,6 +98,11 @@ impl Progress {
         self.log.lock().unwrap().push(line);
     }
 
+    /// Take the log lines collected so far.
+    pub(crate) fn take_log(&self) -> Vec<String> {
+        std::mem::take(&mut *self.log.lock().unwrap())
+    }
+
     /// Run `fut` under this progress' timeout; errors get the API name and
     /// the call log attached.
     pub(crate) async fn run<T>(&self, fut: impl Future<Output = Result<T>>) -> Result<T> {

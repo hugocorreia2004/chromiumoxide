@@ -17,18 +17,32 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Weak};
 
+use chromiumoxide::cdp::browser_protocol::target::SessionId;
 use chromiumoxide::cdp::js_protocol::runtime::{
     CallArgument, CallFunctionOnParams, EvaluateParams, ExceptionDetails, ExecutionContextId,
     ReleaseObjectParams, RemoteObject, RemoteObjectId, RemoteObjectSubtype, RemoteObjectType,
 };
 use chromiumoxide::error::CdpError;
-use chromiumoxide::types::Command;
+use chromiumoxide::types::{Command, CommandResponse};
 use serde_json::Value;
 
 use crate::error::{CONTEXT_DESTROYED_MESSAGE, Error, Result, is_session_closed};
 use crate::frame::{Frame, FrameInner};
 use crate::js::{self, JsValue, sources};
 use crate::js_handle::JSHandle;
+
+static DEFAULT_ISOLATED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(cfg!(feature = "stealth"));
+
+/// Change where `evaluate`, `evaluate_handle`, `locator.evaluate*` and
+/// element handles run by default, for the whole process: `true` = an
+/// isolated world the page cannot see (the default with `stealth`, like
+/// Patchright's `isolatedContext`), `false` = the page's main world
+/// (Playwright's behavior, needed to read page globals). Each call can still
+/// choose with `.isolated_context(..)`.
+pub fn set_default_isolated_context(isolated: bool) {
+    DEFAULT_ISOLATED.store(isolated, std::sync::atomic::Ordering::Relaxed);
+}
 
 /// Which world of a frame a context belongs to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -40,6 +54,19 @@ pub enum World {
 }
 
 impl World {
+    /// Where `evaluate` / `evaluate_handle` run unless told otherwise. With
+    /// `stealth`, like Patchright (`isolatedContext = true`): the isolated
+    /// world, so page scripts never see the automation's calls (rebrowser's
+    /// `mainWorldExecution` / `sourceUrlLeak`). Otherwise Playwright's main
+    /// world. `.isolated_context(false)` reaches page globals either way.
+    pub(crate) fn default_evaluate() -> World {
+        if DEFAULT_ISOLATED.load(std::sync::atomic::Ordering::Relaxed) {
+            World::Utility
+        } else {
+            World::Main
+        }
+    }
+
     pub(crate) fn index(self) -> usize {
         match self {
             World::Main => 0,
@@ -57,6 +84,49 @@ pub(crate) enum ContextTarget {
     Object(RemoteObjectId),
 }
 
+/// The protocol session a context lives in: a frame's (page or OOPIF)
+/// session, or a dedicated worker's session.
+#[derive(Clone)]
+pub(crate) enum ContextSession {
+    Frame(chromiumoxide::Frame),
+    Worker {
+        browser: Weak<crate::browser::BrowserInner>,
+        session: SessionId,
+    },
+}
+
+impl From<chromiumoxide::Frame> for ContextSession {
+    fn from(frame: chromiumoxide::Frame) -> Self {
+        ContextSession::Frame(frame)
+    }
+}
+
+impl ContextSession {
+    /// The CDP session id.
+    pub(crate) fn session_id(&self) -> &SessionId {
+        match self {
+            ContextSession::Frame(frame) => frame.session_id(),
+            ContextSession::Worker { session, .. } => session,
+        }
+    }
+
+    /// Execute a command on the session.
+    pub(crate) async fn execute<C: Command>(
+        &self,
+        cmd: C,
+    ) -> std::result::Result<CommandResponse<C::Response>, CdpError> {
+        match self {
+            ContextSession::Frame(frame) => frame.execute(cmd).await,
+            ContextSession::Worker { browser, session } => {
+                let browser = browser.upgrade().ok_or(CdpError::TargetClosed)?;
+                let guard = browser.cdp_read().await;
+                let cdp = guard.as_ref().ok_or(CdpError::TargetClosed)?;
+                cdp.execute_with_session(cmd, Some(session.clone())).await
+            }
+        }
+    }
+}
+
 /// An execution context of a frame. Cheap to clone.
 #[derive(Clone)]
 pub struct ExecutionContext {
@@ -66,7 +136,7 @@ pub struct ExecutionContext {
 pub(crate) struct ContextInner {
     pub(crate) frame: Weak<FrameInner>,
     pub(crate) world: World,
-    pub(crate) session: chromiumoxide::Frame,
+    pub(crate) session: ContextSession,
     pub(crate) target: ContextTarget,
     pub(crate) context_id: Option<ExecutionContextId>,
     utility_script: tokio::sync::OnceCell<RemoteObjectId>,
@@ -93,9 +163,10 @@ impl ExecutionContext {
     pub(crate) fn new(
         frame: Weak<FrameInner>,
         world: World,
-        session: chromiumoxide::Frame,
+        session: impl Into<ContextSession>,
         target: ContextTarget,
     ) -> Self {
+        let session = session.into();
         let context_id = match &target {
             ContextTarget::Id(id) => Some(*id),
             ContextTarget::Object(object_id) => context_id_from_object_id(object_id),
@@ -130,7 +201,7 @@ impl ExecutionContext {
     }
 
     /// The CDP session this context lives in.
-    pub(crate) fn session(&self) -> &chromiumoxide::Frame {
+    pub(crate) fn session(&self) -> &ContextSession {
         &self.inner.session
     }
 
@@ -242,7 +313,7 @@ impl ExecutionContext {
                     "browserName": "chromium",
                     "shouldPrependErrorPrefix": false,
                     "isUtilityWorld": self.inner.world == World::Utility,
-                    "customEngines": [],
+                    "customEngines": crate::selectors::custom_engines_json(),
                 });
                 let source = js::instantiate_source(
                     sources::INJECTED_SCRIPT,

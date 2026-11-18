@@ -95,8 +95,14 @@ pub struct BrowserConfig {
     /// Whether to enable cache
     pub cache_enabled: bool,
 
+    /// See [`crate::handler::HandlerConfig::wait_for_debugger_on_start`].
+    pub wait_for_debugger_on_start: bool,
+
     /// Avoid easy bot detection by setting `navigator.webdriver` to false
     pub(crate) hidden: bool,
+
+    /// URLs opened at startup, passed after the switches.
+    pub(crate) start_urls: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -121,7 +127,9 @@ pub struct BrowserConfigBuilder {
     disable_default_args: bool,
     request_intercept: bool,
     cache_enabled: bool,
+    wait_for_debugger_on_start: bool,
     hidden: bool,
+    start_urls: Vec<String>,
 }
 
 impl BrowserConfig {
@@ -157,7 +165,9 @@ impl Default for BrowserConfigBuilder {
             disable_default_args: false,
             request_intercept: false,
             cache_enabled: true,
+            wait_for_debugger_on_start: false,
             hidden: false,
+            start_urls: Vec::new(),
         }
     }
 }
@@ -296,6 +306,12 @@ impl BrowserConfigBuilder {
         self
     }
 
+    /// Open `url` at startup (a positional argument after the switches).
+    pub fn start_url(mut self, url: impl Into<String>) -> Self {
+        self.start_urls.push(url.into());
+        self
+    }
+
     pub fn disable_default_args(mut self) -> Self {
         self.disable_default_args = true;
         self
@@ -323,6 +339,13 @@ impl BrowserConfigBuilder {
 
     pub fn disable_cache(mut self) -> Self {
         self.cache_enabled = false;
+        self
+    }
+
+    /// Pause new targets on start until their owner resumes them (see
+    /// [`crate::handler::HandlerConfig::wait_for_debugger_on_start`]).
+    pub fn wait_for_debugger_on_start(mut self) -> Self {
+        self.wait_for_debugger_on_start = true;
         self
     }
 
@@ -361,7 +384,9 @@ impl BrowserConfigBuilder {
             disable_default_args: self.disable_default_args,
             request_intercept: self.request_intercept,
             cache_enabled: self.cache_enabled,
+            wait_for_debugger_on_start: self.wait_for_debugger_on_start,
             hidden: self.hidden,
+            start_urls: self.start_urls,
         })
     }
 }
@@ -380,7 +405,9 @@ impl BrowserConfig {
             builder.arg(Arg::value("remote-debugging-port", self.port));
         }
 
-        if self.extensions.is_empty() {
+        // Patchright drops `--disable-extensions`: a browser without any
+        // extension support is an automation hint.
+        if self.extensions.is_empty() && !cfg!(feature = "stealth") {
             builder.arg(Arg::key("disable-extensions"));
         } else {
             builder.args(
@@ -447,6 +474,7 @@ impl BrowserConfig {
 
         let args = builder.into_iter().collect::<Vec<String>>();
         cmd.args(args);
+        cmd.args(&self.start_urls);
 
         if let Some(ref envs) = self.process_envs {
             cmd.envs(envs);

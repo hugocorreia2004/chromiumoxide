@@ -99,29 +99,36 @@
 #![allow(clippy::field_reassign_with_default)]
 
 pub mod actions;
+mod aria_snapshot;
+mod binding;
 mod browser;
 mod browser_context;
 mod browser_type;
 mod cdp_raw;
 mod cdp_session;
+mod chromium_tracing;
 mod clock;
 mod console;
 mod context_ext;
 mod context_options;
 mod cookies;
 pub mod coverage;
+mod credentials;
 mod dialog;
 mod download;
+mod drop_action;
 mod element_actions;
 pub mod emulation;
 mod error;
 mod events;
 pub mod execution_context;
+pub mod expect;
 mod ext;
 pub mod fetch;
 mod file_chooser;
 mod frame;
 mod frame_selectors;
+mod frame_wait;
 mod har;
 pub mod input;
 pub mod js;
@@ -134,29 +141,43 @@ mod network_manager;
 mod page;
 mod page_ext;
 mod page_extras;
+mod page_state;
+mod page_tools;
 mod pdf;
 mod progress;
+mod proxy;
 mod route;
 mod screencast;
+mod screencast_api;
 mod screenshot;
 mod selector_parser;
 mod selectors;
+mod service_worker;
 mod storage_state;
 pub mod trace;
 mod url_match;
 pub mod video;
+mod web_socket_route;
 mod websocket;
 mod worker;
 
 pub use actions::{
     Action, BoundingBox, Click, Dblclick, ElementState, Fill, Hover, InputFiles, Position, Press,
-    SelectOption, SelectOptionAction, SelectValue, SelectValues, SetChecked, SetInputFiles, Tap,
-    Type, WaitForSelector, kinds,
+    QuerySelector, SelectOption, SelectOptionAction, SelectValue, SelectValues, SetChecked,
+    SetInputFiles, Tap, Type, WaitForSelector, kinds,
 };
-pub use browser::Browser;
-pub use browser_context::{BrowserContext, NewContext, NewContextOptions};
-pub use browser_type::{BrowserType, ConnectOverCdp, Launch, LaunchOptions, chromium};
-pub use cdp_session::{CDPSession, CdpSessionTarget};
+pub use aria_snapshot::PageAriaSnapshot;
+pub use binding::{BindingError, BindingSource, ExposedBinding};
+pub use browser::{Browser, CloseBrowser};
+pub use browser_context::{BrowserContext, NewContext, NewContextOptions, NewPage};
+pub use browser_type::{
+    BrowserType, ConnectOverCdp, IgnoreDefaultArgs, Launch, LaunchOptions, LaunchPersistentContext,
+    chromium,
+};
+pub use cdp_session::{CDPSession, CdpSend, CdpSessionTarget};
+pub use chromium_tracing::StartTracing;
+/// An event of a CDP session, see [`CDPSession::all_events`].
+pub use chromiumoxide::listeners::AnyEvent as CdpEvent;
 pub use clock::{Clock, ClockInstall, ClockTicks, ClockTime};
 pub use console::{ConsoleMessage, ConsoleMessageLocation, WebError};
 pub use context_options::{Device, devices};
@@ -165,8 +186,10 @@ pub use coverage::{
     CoverageRange, CssCoverageEntry, FunctionCoverage, JsCoverageEntry, StartCssCoverage,
     StartJsCoverage, TextRange,
 };
+pub use credentials::{CreateCredential, Credentials, GetCredentials, VirtualCredential};
 pub use dialog::Dialog;
 pub use download::Download;
+pub use drop_action::DropPayload;
 pub use element_actions::WaitForSelectorState;
 pub use emulation::{
     ColorScheme, Contrast, EmulateMedia, ForcedColors, Geolocation, GrantPermissions, Media,
@@ -174,17 +197,18 @@ pub use emulation::{
 };
 pub use error::{CONTEXT_DESTROYED_MESSAGE, Error, Result, TARGET_CLOSED_MESSAGE};
 pub use events::{Event, EventKind, ListenerId, WaitForEvent};
-pub use execution_context::{ExecutionContext, World};
+pub use execution_context::{ExecutionContext, World, set_default_isolated_context};
 pub use fetch::{
-    APIRequest, APIRequestContext, FilePayload, HttpCredentialsSend, MultipartValue, ProxySettings,
-    RequestData, request,
+    APIRequest, APIRequestContext, ClientCertificate, FilePayload, HttpCredentialsSend,
+    MultipartValue, ProxySettings, RequestData, request,
 };
-pub use file_chooser::FileChooser;
+pub use file_chooser::{FileChooser, SetFiles};
 pub use frame::{
     Frame, FrameEvaluate, FrameEvaluateHandle, Goto, LoadState, SetContent, WaitForLoadState,
     WaitForNavigation, WaitForUrl,
 };
-pub use har::{HarContentPolicy, HarMode, HarNotFound, RecordHar, RouteFromHar};
+pub use frame_wait::{Polling, WaitForFunction};
+pub use har::{HarContentPolicy, HarMode, HarNotFound, RecordHar, RouteFromHar, StartHar};
 pub use input::{
     Keyboard, KeyboardModifier, KeyboardPress, KeyboardType, Mouse, MouseButton, MouseButtonAction,
     MouseClick, MouseMove, Touchscreen,
@@ -192,7 +216,8 @@ pub use input::{
 pub use js::JsValue;
 pub use js_handle::{ElementHandle, EvaluateHandleOn, EvaluateOn, JSHandle};
 pub use locator::{
-    FrameLocator, GetByOptions, GetByRoleOptions, Locator, LocatorOptions, SelectorOrLocator,
+    FrameLocator, GetByOptions, GetByRoleOptions, Highlight, Locator, LocatorOptions,
+    SelectorOrLocator,
 };
 pub use locator_utils::{JsRegex, TextMatch, regex};
 pub use network::{
@@ -201,25 +226,30 @@ pub use network::{
 pub use network_manager::HttpCredentials;
 pub use page::{AddInitScript, GoHistory, InitScript, Page, Reload, ViewportSize};
 pub use page_extras::{AddTag, CloseContext, ClosePage};
+pub use page_state::{AddLocatorHandler, MessagesFilter};
+pub use page_tools::{Content, WebStorage};
 pub use pdf::{Pdf, PdfLength, PdfMargin};
 pub use progress::DEFAULT_TIMEOUT;
 pub use route::{
     APIResponse, Abort, Continue, Fallback, Fetch, Fulfill, Route, RouteBuilder, RouteHandlerFn,
     RouteId, Unroute, UnrouteAll, UnrouteBehavior,
 };
+pub use screencast_api::{Screencast, ScreencastFrame, StartScreencast};
 pub use screenshot::{
     Animations, Caret, ElementScreenshot, Mask, PageScreenshot, Rect, ScreenshotScale,
     ScreenshotType,
 };
-pub use selectors::{Selectors, selectors};
+pub use selectors::{RegisterSelector, Selectors, selectors};
+pub use service_worker::WaitForServiceWorker;
 pub use storage_state::{
     NameValue, OriginState, StorageState, StorageStateBuilder, StorageStateSource,
 };
 pub use trace::{Tracing, TracingStart, TracingStop};
 pub use url_match::{UrlMatch, glob_to_regex_pattern};
 pub use video::Video;
+pub use web_socket_route::{WebSocketRoute, WebSocketRouteServer};
 pub use websocket::{WebSocket, WebSocketEvent, WebSocketPayload};
-pub use worker::{Worker, WorkerEvaluate};
+pub use worker::{Worker, WorkerEvaluate, WorkerEvaluateHandle};
 
 /// Re-export of the underlying CDP library.
 pub use chromiumoxide;

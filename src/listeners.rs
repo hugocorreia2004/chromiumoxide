@@ -11,6 +11,28 @@ use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender};
 use chromiumoxide_cdp::cdp::{Event, EventKind, IntoEventKind};
 use chromiumoxide_types::MethodId;
 
+/// Every event of a session, whatever its method: a listener of this type
+/// receives all events (typed ones serialized back to JSON). Like
+/// Playwright's `cdpSession.on('event')`.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct AnyEvent {
+    /// The event's `method`, e.g. `Page.frameNavigated`.
+    pub method: String,
+    /// The event's `params`.
+    pub params: serde_json::Value,
+}
+
+/// The listener key of [`AnyEvent`].
+pub const ANY_EVENT_METHOD: &str = "*";
+
+impl chromiumoxide_types::MethodType for AnyEvent {
+    fn method_id() -> MethodId {
+        ANY_EVENT_METHOD.into()
+    }
+}
+
+impl chromiumoxide_cdp::cdp::CustomEvent for AnyEvent {}
+
 /// All the currently active listeners
 #[derive(Debug, Default)]
 pub struct EventListeners {
@@ -31,9 +53,27 @@ impl EventListeners {
     }
 
     /// Queue in a event that should be send to all listeners
-    pub fn start_send<T: Event>(&mut self, event: T) {
+    pub fn start_send<T: Event + serde::Serialize>(&mut self, event: T) {
+        if self.listeners.contains_key(ANY_EVENT_METHOD) {
+            if let Ok(params) = serde_json::to_value(&event) {
+                self.send_any(T::method_id().as_ref(), params);
+            }
+        }
         if let Some(subscriptions) = self.listeners.get_mut(&T::method_id()) {
             let event: Arc<dyn Event> = Arc::new(event);
+            subscriptions
+                .iter_mut()
+                .for_each(|sub| sub.start_send(Arc::clone(&event)));
+        }
+    }
+
+    /// Deliver an event to the [`AnyEvent`] listeners.
+    fn send_any(&mut self, method: &str, params: serde_json::Value) {
+        if let Some(subscriptions) = self.listeners.get_mut(ANY_EVENT_METHOD) {
+            let event: Arc<dyn Event> = Arc::new(AnyEvent {
+                method: method.to_string(),
+                params,
+            });
             subscriptions
                 .iter_mut()
                 .for_each(|sub| sub.start_send(Arc::clone(&event)));
@@ -47,6 +87,9 @@ impl EventListeners {
         method: &str,
         val: serde_json::Value,
     ) -> serde_json::Result<()> {
+        if self.listeners.contains_key(ANY_EVENT_METHOD) {
+            self.send_any(method, val.clone());
+        }
         if let Some(subscriptions) = self.listeners.get_mut(method) {
             let mut event = None;
             if let Some(json_to_arc_event) = subscriptions

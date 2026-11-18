@@ -68,6 +68,8 @@ pub(crate) struct PageCapture {
     pub(crate) screencast: PageScreencast,
     pub(crate) video: Mutex<Option<crate::video::Video>>,
     pub(crate) tracing: Mutex<Option<(u64, tokio::task::JoinHandle<()>)>>,
+    /// `page.screencast().start()` in progress.
+    pub(crate) public: Mutex<Option<crate::screencast_api::Running>>,
 }
 
 struct Running {

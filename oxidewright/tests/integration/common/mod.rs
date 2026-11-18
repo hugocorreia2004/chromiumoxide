@@ -52,6 +52,10 @@ where
     F: FnOnce(TestContext) -> Fut + Send + 'static,
     Fut: Future<Output = ()> + Send + 'static,
 {
+    // The suite is ported from Playwright, whose tests read page globals:
+    // evaluate in the main world like Playwright (the stealth default, the
+    // isolated world, is covered by `stealth_defaults.rs`).
+    oxidewright::set_default_isolated_context(false);
     // The test runs on its own thread and is watched from this one with a
     // plain OS timeout: if every runtime worker blocks (a deadlock on a std
     // lock, say), tokio's timers stop firing too, so the deadlines inside the
