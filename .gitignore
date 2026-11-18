@@ -3,3 +3,5 @@
 Cargo.lock
 .idea/
 .cache/
+# Build output anywhere in the tree (not only at the root)
+target/
