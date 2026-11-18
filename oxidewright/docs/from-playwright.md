@@ -745,7 +745,7 @@ Also: `from_cache`, `sizes`.
 | `api.put()` | `api.put(url).await` |  |
 | `api.storageState()` | `api.storage_state().await` |  |
 
-### APIResponse (`oxidewright::fetch::APIResponse`)
+### APIResponse (`oxidewright::APIResponse`)
 
 | Playwright | oxidewright | Notes |
 |---|---|---|
@@ -902,8 +902,8 @@ Also: `page`, `is_closed`.
 | `selectors.setTestIdAttribute()` | `selectors().set_test_id_attribute(attribute_name)` |  |
 
 
-`route.fetch()` returns the root `oxidewright::APIResponse`, with `url`, `status`, `status_text`,
-`ok`, `headers`, `headers_array`, `body`, `text` and `json`.
+`route.fetch()` returns the same `oxidewright::APIResponse` as `APIRequestContext` requests
+(`APIResponse::new(status, headers, body)` builds one to fulfill a route with).
 
 ### WebSocketRoute
 
@@ -978,7 +978,9 @@ Also: `to_be_attached`, `to_be_disabled`, `to_be_editable`, `to_be_empty`, `to_b
 `to_have_accessible_error_message`, `to_have_class`, `to_contain_class`, `to_have_count`,
 `to_have_id`, `to_have_role`, `to_have_value`, `to_have_values`.
 
-Not ported: soft assertions, `expect.poll`, `expect.extend`, `toPass`, the `signal` option
+`expect.poll(fn)` is `expect::poll(fn)` and `expect(fn).toPass()` is `expect::to_pass(fn)`.
+
+Not ported: soft assertions, `expect.extend`, the `signal` option
 (drop the future instead), `URLPattern`, snapshot path templates and `--update-snapshots`
 (`to_have_screenshot` takes an explicit PNG path: a missing file is written and the assertion
 fails).

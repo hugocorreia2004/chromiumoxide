@@ -33,8 +33,9 @@ use crate::cookies::{
     rewrite_cookies, url_hostname,
 };
 use crate::error::{Error, Result, ResultExt};
+use crate::network::Header;
 use crate::page::Page;
-use crate::storage_state::{NameValue, OriginState, StorageState, StorageStateSource};
+use crate::storage_state::{OriginState, StorageState, StorageStateSource};
 use crate::url_match::construct_url_based_on_base_url;
 
 pub use client_certificate::ClientCertificate;
@@ -1487,8 +1488,10 @@ impl Fetch {
             .unwrap()
             .insert(uid, Arc::new(raw.body));
         Ok(APIResponse {
-            context: self.context.clone(),
-            uid,
+            body: BodySource::Stored {
+                context: self.context.clone(),
+                uid,
+            },
             url: raw.url,
             status: raw.status,
             status_text: raw.status_text,
@@ -1748,11 +1751,23 @@ async fn send_request(
 // Responses
 // ----------------------------------------------------------------------
 
-/// The response of an [`APIRequestContext`] request. Cheap to clone.
+/// Where the body of an [`APIResponse`] lives.
+#[derive(Clone)]
+enum BodySource {
+    /// Kept by the request context until `dispose` (requests).
+    Stored {
+        context: APIRequestContext,
+        uid: u64,
+    },
+    /// Owned by the response (`route.fetch`, [`APIResponse::new`]).
+    Owned(Arc<Vec<u8>>),
+}
+
+/// The response of an [`APIRequestContext`] request or of `route.fetch()`.
+/// Cheap to clone.
 #[derive(Clone)]
 pub struct APIResponse {
-    context: APIRequestContext,
-    uid: u64,
+    body: BodySource,
     url: String,
     status: u16,
     status_text: String,
@@ -1783,6 +1798,38 @@ impl std::fmt::Display for APIResponse {
 }
 
 impl APIResponse {
+    /// Create a response (e.g. to fulfill a route with).
+    pub fn new(status: u16, headers: Vec<Header>, body: impl Into<Vec<u8>>) -> Self {
+        Self::owned(
+            String::new(),
+            status,
+            crate::network::status_text(status).to_string(),
+            headers,
+            body.into(),
+        )
+    }
+
+    /// A response holding its own body.
+    pub(crate) fn owned(
+        url: String,
+        status: u16,
+        status_text: String,
+        headers: Vec<Header>,
+        body: Vec<u8>,
+    ) -> Self {
+        APIResponse {
+            body: BodySource::Owned(Arc::new(body)),
+            url,
+            status,
+            status_text,
+            headers: headers.into_iter().map(|h| (h.name, h.value)).collect(),
+            log: Arc::default(),
+            server_addr: None,
+            security_details: None,
+            timing: Default::default(),
+        }
+    }
+
     /// The request log (`apiResponse._fetchLog()`), used by `to_be_ok`.
     pub(crate) fn fetch_log(&self) -> Vec<String> {
         self.log.as_ref().clone()
@@ -1845,13 +1892,10 @@ impl APIResponse {
     }
 
     /// All headers, in order, with repeated headers kept apart.
-    pub fn headers_array(&self) -> Vec<NameValue> {
+    pub fn headers_array(&self) -> Vec<Header> {
         self.headers
             .iter()
-            .map(|(name, value)| NameValue {
-                name: name.clone(),
-                value: value.clone(),
-            })
+            .map(|(name, value)| Header::new(name.clone(), value.clone()))
             .collect()
     }
 
@@ -1870,15 +1914,19 @@ impl APIResponse {
     }
 
     fn body_bytes(&self) -> Result<Arc<Vec<u8>>> {
-        if self.context.responses_disposed() {
+        let (context, uid) = match &self.body {
+            BodySource::Owned(body) => return Ok(body.clone()),
+            BodySource::Stored { context, uid } => (context, uid),
+        };
+        if context.responses_disposed() {
             return Err(Error::target_closed_with("Response has been disposed"));
         }
-        self.context
+        context
             .inner
             .responses
             .lock()
             .unwrap()
-            .get(&self.uid)
+            .get(uid)
             .cloned()
             .ok_or_else(|| Error::target_closed_with("Response has been disposed"))
     }
@@ -1909,12 +1957,9 @@ impl APIResponse {
 
     /// Release the body.
     pub async fn dispose(&self) -> Result<()> {
-        self.context
-            .inner
-            .responses
-            .lock()
-            .unwrap()
-            .remove(&self.uid);
+        if let BodySource::Stored { context, uid } = &self.body {
+            context.inner.responses.lock().unwrap().remove(uid);
+        }
         Ok(())
     }
 }

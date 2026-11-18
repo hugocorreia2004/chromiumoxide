@@ -1,8 +1,8 @@
-// Extracted from patchright-core 1.64.3 (lib/coreBundle.js, packages/playwright-core/src/generated/webViewInputSource.ts).
+// Extracted from playwright-core 1.65.1 with the patchright-core 1.64.3 patches merged in (lib/coreBundle.js, packages/playwright-core/src/generated/webViewInputSource.ts).
 // Origin: Playwright (https://github.com/microsoft/playwright), as patched by Patchright (https://github.com/Kaliiiiiiiiii-Vinyzu/patchright).
 // Copyright (c) Microsoft Corporation and the Patchright contributors.
 // Licensed under the Apache License, Version 2.0 (Apache-2.0); see oxidewright/NOTICE.
-// Do not edit: regenerate with `node oxidewright/scripts/update-injected.mjs <package>`.
+// Do not edit: regenerate with `cargo run -p oxidewright-xtask -- merge-patchright <base> <patched> <latest>`.
 
 var __commonJS = obj => {
   let required = false;

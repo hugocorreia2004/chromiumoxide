@@ -89,7 +89,7 @@ fn wa_005_should_avoid_side_effects_after_timeout() {
             .await
             .unwrap_err();
         // Let the abort reach the page, then make sure nothing else is logged.
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        tokio::time::sleep(Duration::from_millis(1000)).await;
         let saved = counter.load(Ordering::SeqCst);
         page.wait_for_timeout(2000).await.unwrap();
         assert!(

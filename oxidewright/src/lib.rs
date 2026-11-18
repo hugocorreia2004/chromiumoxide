@@ -199,8 +199,8 @@ pub use error::{CONTEXT_DESTROYED_MESSAGE, Error, Result, TARGET_CLOSED_MESSAGE}
 pub use events::{Event, EventKind, ListenerId, WaitForEvent};
 pub use execution_context::{ExecutionContext, World, set_default_isolated_context};
 pub use fetch::{
-    APIRequest, APIRequestContext, ClientCertificate, FilePayload, HttpCredentialsSend,
-    MultipartValue, ProxySettings, RequestData, request,
+    APIRequest, APIRequestContext, APIResponse, ClientCertificate, FilePayload,
+    HttpCredentialsSend, MultipartValue, ProxySettings, RequestData, request,
 };
 pub use file_chooser::{FileChooser, SetFiles};
 pub use frame::{
@@ -231,8 +231,8 @@ pub use page_tools::{Content, WebStorage};
 pub use pdf::{Pdf, PdfLength, PdfMargin};
 pub use progress::DEFAULT_TIMEOUT;
 pub use route::{
-    APIResponse, Abort, Continue, Fallback, Fetch, Fulfill, Route, RouteBuilder, RouteHandlerFn,
-    RouteId, Unroute, UnrouteAll, UnrouteBehavior,
+    Abort, Continue, Fallback, Fetch, Fulfill, Route, RouteBuilder, RouteHandlerFn, RouteId,
+    Unroute, UnrouteAll, UnrouteBehavior,
 };
 pub use screencast_api::{Screencast, ScreencastFrame, StartScreencast};
 pub use screenshot::{

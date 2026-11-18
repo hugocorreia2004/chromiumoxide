@@ -1,8 +1,8 @@
-// Extracted from patchright-core 1.64.3 (lib/coreBundle.js, packages/playwright-core/src/generated/storageScriptSource.ts).
+// Extracted from playwright-core 1.65.1 with the patchright-core 1.64.3 patches merged in (lib/coreBundle.js, packages/playwright-core/src/generated/storageScriptSource.ts).
 // Origin: Playwright (https://github.com/microsoft/playwright), as patched by Patchright (https://github.com/Kaliiiiiiiiii-Vinyzu/patchright).
 // Copyright (c) Microsoft Corporation and the Patchright contributors.
 // Licensed under the Apache License, Version 2.0 (Apache-2.0); see oxidewright/NOTICE.
-// Do not edit: regenerate with `node oxidewright/scripts/update-injected.mjs <package>`.
+// Do not edit: regenerate with `cargo run -p oxidewright-xtask -- merge-patchright <base> <patched> <latest>`.
 
 var __commonJS = obj => {
   let required = false;
@@ -399,7 +399,7 @@ var StorageScript = class {
   _trySerialize(value) {
     let trivial = true;
     const encoded = serializeAsCallArgument(value, (v) => {
-      const isTrivial = this._isPlainObject(v) || Array.isArray(v) || typeof v === "string" || typeof v === "number" || typeof v === "boolean" || Object.is(v, null);
+      const isTrivial = this._isPlainObject(v) || Array.isArray(v) || typeof v === "string" || typeof v === "number" && Number.isFinite(v) || typeof v === "boolean" || Object.is(v, null);
       if (!isTrivial)
         trivial = false;
       return { fallThrough: v };
@@ -425,14 +425,14 @@ var StorageScript = class {
           const record = {};
           if (objectStore.keyPath === null) {
             const { encoded: encoded2, trivial: trivial2 } = this._trySerialize(key);
-            if (trivial2)
+            if (encoded2 === void 0)
               record.key = trivial2;
             else
               record.keyEncoded = encoded2;
           }
           const value = await this._idbRequestToPromise(objectStore.get(key));
           const { encoded, trivial } = this._trySerialize(value);
-          if (trivial)
+          if (encoded === void 0)
             record.value = trivial;
           else
             record.valueEncoded = encoded;
@@ -521,11 +521,10 @@ var StorageScript = class {
       await Promise.all(dbInfo.stores.map(async (store) => {
         const objectStore = transaction.objectStore(store.name);
         await Promise.all(store.records.map(async (record) => {
-          var _a, _b;
           await this._idbRequestToPromise(
             objectStore.add(
-              (_a = record.value) != null ? _a : parseEvaluationResultValue(record.valueEncoded),
-              (_b = record.key) != null ? _b : parseEvaluationResultValue(record.keyEncoded)
+              "value" in record ? record.value : parseEvaluationResultValue(record.valueEncoded),
+              "key" in record ? record.key : parseEvaluationResultValue(record.keyEncoded)
             )
           );
         }));

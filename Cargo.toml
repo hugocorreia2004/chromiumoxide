@@ -85,4 +85,5 @@ members = [
   "chromiumoxide_cdp",
   "chromiumoxide_fetcher",
   "oxidewright",
+  "oxidewright/xtask",
 ]

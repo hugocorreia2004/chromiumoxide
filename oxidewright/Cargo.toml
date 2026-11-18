@@ -11,7 +11,6 @@ keywords = ["playwright", "chrome", "automation", "testing", "cdp"]
 categories = ["web-programming", "api-bindings", "development-tools::testing"]
 include = [
   "src/**/*",
-  "scripts/*",
   "README.md",
   "NOTICE",
   "LICENSE-APACHE",

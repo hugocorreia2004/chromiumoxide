@@ -254,32 +254,7 @@ impl ResponseLike for crate::fetch::APIResponse {
     }
 }
 
-impl ResponseLike for crate::route::APIResponse {
-    fn is_ok(&self) -> bool {
-        self.ok()
-    }
-    fn content_type(&self) -> Option<String> {
-        self.headers().get("content-type").cloned()
-    }
-    fn body_text(&self) -> Pin<Box<dyn Future<Output = Option<String>> + Send + '_>> {
-        Box::pin(async move { self.text().await.ok() })
-    }
-    fn request_log(&self) -> Vec<String> {
-        Vec::new()
-    }
-}
-
 impl Expectable for crate::fetch::APIResponse {
-    type Assertions = APIResponseAssertions;
-    fn assertions(&self) -> APIResponseAssertions {
-        APIResponseAssertions {
-            response: Box::new(self.clone()),
-            cfg: Config::default(),
-        }
-    }
-}
-
-impl Expectable for crate::route::APIResponse {
     type Assertions = APIResponseAssertions;
     fn assertions(&self) -> APIResponseAssertions {
         APIResponseAssertions {

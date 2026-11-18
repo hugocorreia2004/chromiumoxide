@@ -34,7 +34,6 @@ fn should_timeout_waiting_for_button_to_be_enabled() {
 }
 
 #[test]
-#[ignore = "the bundled injected script (1.64) has no 'non-inert' element state"]
 fn should_timeout_waiting_for_inert_element_to_become_non_inert() {
     run(|t| async move {
         t.page
