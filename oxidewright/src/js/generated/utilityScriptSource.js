@@ -1,8 +1,8 @@
-// Extracted from patchright-core 1.64.3 (lib/coreBundle.js, packages/playwright-core/src/generated/utilityScriptSource.ts).
+// Extracted from playwright-core 1.65.1 with the patchright-core 1.64.3 patches merged in (lib/coreBundle.js, packages/playwright-core/src/generated/utilityScriptSource.ts).
 // Origin: Playwright (https://github.com/microsoft/playwright), as patched by Patchright (https://github.com/Kaliiiiiiiiii-Vinyzu/patchright).
 // Copyright (c) Microsoft Corporation and the Patchright contributors.
 // Licensed under the Apache License, Version 2.0 (Apache-2.0); see oxidewright/NOTICE.
-// Do not edit: regenerate with `node oxidewright/scripts/update-injected.mjs <package>`.
+// Do not edit: regenerate with `cargo run -p oxidewright-xtask -- merge-patchright <base> <patched> <latest>`.
 
 var __commonJS = obj => {
   let required = false;
@@ -409,27 +409,24 @@ var UtilityScript = class {
     } else {
       if (typeof result === "function") result = result(...parameters);
     }
-    return returnByValue ? this._promiseAwareJsonValueNoThrow(result) : result;
+    if (isThenable(result)) {
+      return (async () => {
+        const value = await result;
+        return returnByValue ? this._jsonValueNoThrow(value) : value;
+      })();
+    }
+    return returnByValue ? this._jsonValueNoThrow(result) : result;
   }
   jsonValue(returnByValue, value) {
     if (value === void 0) return void 0;
     return serializeAsCallArgument(value, (value2) => ({ fallThrough: value2 }));
   }
-  _promiseAwareJsonValueNoThrow(value) {
-    const safeJson = (value2) => {
-      try {
-        return this.jsonValue(true, value2);
-      } catch (e) {
-        return void 0;
-      }
-    };
-    if (value && typeof value === "object" && typeof value.then === "function") {
-      return (async () => {
-        const promiseValue = await value;
-        return safeJson(promiseValue);
-      })();
+  _jsonValueNoThrow(value) {
+    try {
+      return this.jsonValue(true, value);
+    } catch (e) {
+      return void 0;
     }
-    return safeJson(value);
   }
   takeFunctionCallback(name) {
     const callback = this._functionCallbacks.get(name);
@@ -437,3 +434,6 @@ var UtilityScript = class {
     return callback;
   }
 };
+function isThenable(value) {
+  return value && typeof value === "object" && typeof value.then === "function";
+}

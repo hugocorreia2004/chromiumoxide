@@ -632,7 +632,7 @@ impl ElementHandle {
                         &ctx,
                         r#"async (injected, node, { optionsToSelect, force, frameVisible }) => {
   if (!force) {
-    const checkResult = await injected.checkElementStates(node, ['visible', 'enabled'], frameVisible);
+    const checkResult = await injected.checkElementStates(node, ['visible', 'enabled', 'non-inert'], frameVisible);
     if (checkResult)
       return checkResult;
   }
@@ -676,7 +676,7 @@ impl ElementHandle {
                     .eval_in_utility(
                         r#"async (injected, node, { value, force, frameVisible }) => {
   if (!force) {
-    const checkResult = await injected.checkElementStates(node, ['visible', 'enabled', 'editable'], frameVisible);
+    const checkResult = await injected.checkElementStates(node, ['visible', 'enabled', 'editable', 'non-inert'], frameVisible);
     if (checkResult)
       return checkResult;
   }
@@ -759,7 +759,7 @@ impl ElementHandle {
         if !force {
             let (states, description) = if action.wait_for_enabled {
                 (
-                    json!(["visible", "enabled", "stable"]),
+                    json!(["visible", "enabled", "stable", "non-inert"]),
                     "visible, enabled and stable",
                 )
             } else {

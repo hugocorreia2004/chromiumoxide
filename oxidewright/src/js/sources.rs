@@ -1,7 +1,8 @@
 //! The JavaScript bundles injected into pages.
 //!
-//! They are extracted from the `patchright-core` npm package (see
-//! `generated/VERSION`) by `scripts/update-injected.mjs` and are licensed
+//! They are extracted from the `patchright-core` npm package (merged onto a
+//! newer `playwright-core` when Patchright lags behind, see
+//! `generated/VERSION`) by `cargo run -p oxidewright-xtask` and are licensed
 //! under the Apache License 2.0 (Playwright and Patchright authors, see the
 //! crate's `NOTICE` file). Each one is a CommonJS-style module body: wrap it
 //! in a function that declares `const module = {}` and read

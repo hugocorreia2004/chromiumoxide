@@ -148,13 +148,14 @@ Opt-in features that **are** detectable when you enable them:
 | Cookies, storage state | Implemented (Playwright-compatible JSON) |
 | Screenshots, PDF | Implemented |
 | HAR: `record_har`, `route_from_har` | Implemented; zipped HAR files not supported |
-| APIRequestContext (`request()`, `context.request()`) | Implemented; missing `timing()`, `server_addr()`, `security_details()`, `fetch(request)`; requests use rustls, not Chrome's fingerprint |
+| APIRequestContext (`request()`, `context.request()`) | Implemented, incl. `timing()`, `server_addr()`, `security_details()` and `client_certificates` (PEM only); requests use rustls, not Chrome's fingerprint |
 | Tracing | Partial: screencast frames and groups; no per-action events, DOM snapshots, network or console entries |
 | Video | Implemented with an external `ffmpeg` (`OXIDEWRIGHT_FFMPEG_PATH` or `PATH`) |
-| Clock, coverage, CDP sessions, selectors (`set_test_id_attribute`) | Implemented (`selectors().register` missing) |
-| Workers | Partial: `evaluate` (JSON values), no `evaluate_handle` |
-| Assertions (`expect`) | Implemented: locator, page and API response matchers incl. `to_match_aria_snapshot` and `to_have_screenshot`; no soft assertions, `expect.poll` or `toPass` (see [Assertions](#assertions-expect)) |
-| Missing | `wait_for_function`, `wait_for_timeout`, `expose_function`/`expose_binding`, `add_locator_handler`, `route_web_socket`, service workers, `pause`, `page.aria_snapshot`, intercepting the very first request of a popup or out-of-process iframe |
+| Clock, coverage, CDP sessions, selectors (`register`, `set_test_id_attribute`) | Implemented |
+| Workers, service workers | Implemented |
+| Assertions (`expect`) | Implemented: locator, page and API response matchers incl. `to_match_aria_snapshot` and `to_have_screenshot`, `expect::poll` and `expect::to_pass`; no soft assertions or `expect.extend` (see [Assertions](#assertions-expect)) |
+| Also implemented | `wait_for_function`, `wait_for_timeout`, `expose_function`/`expose_binding`, `add_locator_handler`, `route_web_socket`, `aria_snapshot`, `get_by_ref`, `page.screencast()`, `browser.start_tracing` |
+| Missing | `pause`/inspector, WebMCP, `launch_server`/`connect`, client certificates of browser contexts, the `exposeFunctions` option, routes on the very first request of a `noopener` popup or of an out-of-process iframe (see [docs/from-playwright.md](docs/from-playwright.md#not-ported-as-classes)) |
 
 ## Assertions (`expect`)
 
@@ -204,8 +205,8 @@ expect(&page.request().get(url).await?).to_be_ok().await?;
     -   unexpected value "Text content"
   ```
 
-Differences with Playwright Test: no soft assertions, `expect.poll`, `expect.extend`, `toPass`,
-`AbortSignal` (drop the future instead) or `URLPattern`. ARIA snapshot templates are parsed with
+Differences with Playwright Test: no soft assertions or `expect.extend` (`expect.poll` and
+`toPass` are `expect::poll` and `expect::to_pass`), no `AbortSignal` (drop the future instead) or `URLPattern`. ARIA snapshot templates are parsed with
 `yaml-rust2`, so YAML syntax errors are worded differently. `to_have_screenshot` compares
 with a PNG at an explicit path using Playwright's `pixelmatch` comparator (`threshold`,
 `max_diff_pixels`, `max_diff_pixel_ratio`); a missing file is written and the assertion fails,
@@ -215,8 +216,18 @@ comparator, snapshot path templates and `--update-snapshots` modes are not porte
 ## Updating the bundled scripts
 
 ```sh
-node oxidewright/scripts/update-injected.mjs patchright-core@<version>   # or a .tgz / directory
+cargo run -p oxidewright-xtask -- update-injected patchright-core@<version>   # or a .tgz / directory
 ```
+
+The bundled scripts are Playwright 1.65.1 with the Patchright 1.64.3 patches merged in, because
+Patchright has no 1.65 release yet. When Playwright is ahead of Patchright, merge the
+Patchright patches onto the newer Playwright (fails on a conflict):
+
+```sh
+cargo run -p oxidewright-xtask -- merge-patchright playwright-core@1.64.1 patchright-core@1.64.3 playwright-core@1.65.1
+```
+
+Both are plain Rust (the merge calls `git merge-file`); no Node.js is needed.
 
 ## License
 

@@ -488,7 +488,6 @@ fn should_fill_fixed_position_input() {
 }
 
 #[test]
-#[ignore = "needs the Playwright 1.65 injected script (issue 43483); the bundled one is 1.64"]
 fn should_be_able_to_fill_when_focus_is_in_the_wrong_frame() {
     run(|t| async move {
         t.page

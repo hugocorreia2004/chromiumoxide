@@ -1,8 +1,8 @@
-// Extracted from patchright-core 1.64.3 (lib/coreBundle.js, packages/playwright-core/src/generated/injectedScriptSource.ts).
+// Extracted from playwright-core 1.65.1 with the patchright-core 1.64.3 patches merged in (lib/coreBundle.js, packages/playwright-core/src/generated/injectedScriptSource.ts).
 // Origin: Playwright (https://github.com/microsoft/playwright), as patched by Patchright (https://github.com/Kaliiiiiiiiii-Vinyzu/patchright).
 // Copyright (c) Microsoft Corporation and the Patchright contributors.
 // Licensed under the Apache License, Version 2.0 (Apache-2.0); see oxidewright/NOTICE.
-// Do not edit: regenerate with `node oxidewright/scripts/update-injected.mjs <package>`.
+// Do not edit: regenerate with `cargo run -p oxidewright-xtask -- merge-patchright <base> <patched> <latest>`.
 
 var __commonJS = obj => {
   let required = false;
@@ -583,7 +583,9 @@ function yamlStringNeedsQuotes(str) {
     return true;
   if (/^\[/.test(str))
     return true;
-  if (!isNaN(Number(str)) || ["y", "n", "yes", "no", "true", "false", "on", "off", "null"].includes(str.toLowerCase()))
+  if (!isNaN(Number(str)) || ["y", "n", "yes", "no", "true", "false", "on", "off", "null", "~"].includes(str.toLowerCase()))
+    return true;
+  if (/^[-+]?\.(inf|nan)$/i.test(str))
     return true;
   return false;
 }
@@ -3025,6 +3027,35 @@ var removeNamelessImages = {
       return "remove";
   }
 };
+var rolesWithIdentifyingNames = /* @__PURE__ */ new Set([
+  "alertdialog",
+  "dialog",
+  "banner",
+  "complementary",
+  "contentinfo",
+  "form",
+  "main",
+  "navigation",
+  "region",
+  "search",
+  "application",
+  "document",
+  "figure",
+  "group",
+  "grid",
+  "listbox",
+  "menu",
+  "menubar",
+  "radiogroup",
+  "tablist",
+  "tabpanel",
+  "toolbar",
+  "tree",
+  "treegrid",
+  "table",
+  "columnheader",
+  "rowheader"
+]);
 var removeRedundantNames = {
   name: "removeRedundantNames",
   enter(node, ctx) {
@@ -3044,7 +3075,7 @@ var removeRedundantNames = {
     const nameFromContentRefs = (_a = ctx.snapshot.info.get(node.ref)) == null ? void 0 : _a.nameFromContentRefs;
     if (!(nameFromContentRefs == null ? void 0 : nameFromContentRefs.length))
       return;
-    if (nameFromContentRefs.every((ref) => !ctx.pendingContentRefs.has(ref))) {
+    if (!rolesWithIdentifyingNames.has(node.role) && nameFromContentRefs.every((ref) => !ctx.pendingContentRefs.has(ref))) {
       node.name = "";
     } else {
       for (const ref of nameFromContentRefs)
@@ -3114,6 +3145,13 @@ function parentElementOrShadowHost(element) {
     return;
   if (element.parentNode.nodeType === 11 && element.parentNode.host)
     return element.parentNode.host;
+}
+function isElementInert(element) {
+  for (let e = element; e; e = parentElementOrShadowHost(e)) {
+    if (e.hasAttribute("inert"))
+      return true;
+  }
+  return false;
 }
 function enclosingShadowRootOrDocument(element) {
   let node = element;
@@ -3535,7 +3573,7 @@ var validRoles = [
   "treeitem"
 ];
 function getExplicitAriaRole(element) {
-  const roles = (element.getAttribute("role") || "").split(" ").map((role) => role.trim());
+  const roles = (element.getAttribute("role") || "").toLowerCase().split(" ").map((role) => role.trim());
   return roles.find((role) => validRoles.includes(role)) || null;
 }
 function hasPresentationConflictResolution(element, role) {
@@ -3604,6 +3642,16 @@ function belongsToDisplayNoneOrAriaHiddenOrNonSlotted(element) {
   }
   return hidden;
 }
+function isTextNodeNotRendered(text) {
+  const parent = text.parentElement;
+  if (!parent)
+    return false;
+  if (parent.shadowRoot && !text.assignedSlot)
+    return true;
+  if (elementSafeTagName(parent) === "DETAILS" && !parent.open)
+    return true;
+  return false;
+}
 function getIdRefs(element, ref) {
   if (!ref)
     return [];
@@ -3611,7 +3659,7 @@ function getIdRefs(element, ref) {
   if (!root)
     return [];
   try {
-    const ids = ref.split(" ").filter((id) => !!id);
+    const ids = ref.split(/[ \t\n\f\r]+/).filter((id) => !!id);
     const result = [];
     for (const id of ids) {
       const firstElement = root.querySelector("#" + CSS.escape(id));
@@ -3692,11 +3740,8 @@ function parseCSSContentPropertyAsString(element, content, isPseudo) {
   }
 }
 function getAriaLabelledByElements(element) {
-  const ref = element.getAttribute("aria-labelledby");
-  if (ref === null)
-    return null;
-  const refs = getIdRefs(element, ref);
-  return refs.length ? refs : null;
+  const refs = element.ariaLabelledByElements || getIdRefs(element, element.getAttribute("aria-labelledby"));
+  return (refs == null ? void 0 : refs.length) ? [...refs] : null;
 }
 function allowsNameFromContent(role, targetDescendant) {
   const alwaysAllowsNameFromContent = ["button", "cell", "checkbox", "columnheader", "gridcell", "heading", "link", "menuitem", "menuitemcheckbox", "menuitemradio", "option", "radio", "row", "rowheader", "switch", "tab", "tooltip", "treeitem"].includes(role);
@@ -3788,8 +3833,9 @@ var kAriaInvalidRoles = [
   "tree"
 ];
 function getAriaInvalid(element) {
-  const ariaInvalid = element.getAttribute("aria-invalid");
-  if (!ariaInvalid || ariaInvalid.trim() === "" || ariaInvalid.toLocaleLowerCase() === "false")
+  var _a;
+  const ariaInvalid = (_a = element.getAttribute("aria-invalid")) == null ? void 0 : _a.toLowerCase();
+  if (!ariaInvalid || ariaInvalid.trim() === "" || ariaInvalid === "false")
     return "false";
   if (ariaInvalid === "true" || ariaInvalid === "grammar" || ariaInvalid === "spelling")
     return ariaInvalid;
@@ -3828,7 +3874,7 @@ function insideTargetElement(options) {
   return options.embeddedInTargetElement === "self" || options.embeddedInTargetElement === "descendant";
 }
 function getTextAlternativeInternal(element, options) {
-  var _a, _b, _c, _d, _e;
+  var _a;
   if (options.visitedElements.has(element))
     return emptyCompositeString();
   const childOptions = {
@@ -3836,8 +3882,7 @@ function getTextAlternativeInternal(element, options) {
     embeddedInTargetElement: options.embeddedInTargetElement === "self" ? "descendant" : options.embeddedInTargetElement
   };
   if (!options.includeHidden) {
-    const isEmbeddedInHiddenReferenceTraversal = !!((_a = options.embeddedInLabelledBy) == null ? void 0 : _a.hidden) || !!((_b = options.embeddedInDescribedBy) == null ? void 0 : _b.hidden) || !!((_c = options.embeddedInNativeTextAlternative) == null ? void 0 : _c.hidden) || !!((_d = options.embeddedInLabel) == null ? void 0 : _d.hidden);
-    if (isElementIgnoredForAria(element) || !isEmbeddedInHiddenReferenceTraversal && isElementHiddenForAria(element)) {
+    if (isElementIgnoredForAria(element) || !isEmbeddedInHiddenReferenceTraversal(options) && isElementHiddenForAria(element)) {
       options.visitedElements.add(element);
       return emptyCompositeString();
     }
@@ -3879,7 +3924,7 @@ function getTextAlternativeInternal(element, options) {
             selectedOptions.push(element.options[0]);
         } else {
           const listbox = role === "combobox" ? queryInAriaOwned(element, "*").find((e) => getAriaRole(e) === "listbox") : element;
-          selectedOptions = listbox ? queryInAriaOwned(listbox, '[aria-selected="true"]').filter((e) => getAriaRole(e) === "option") : [];
+          selectedOptions = listbox ? queryInAriaOwned(listbox, '[aria-selected="true" i]').filter((e) => getAriaRole(e) === "option") : [];
         }
         if (!selectedOptions.length && tagName === "INPUT") {
           return compositeString(element.value, element, options.collectElements);
@@ -4046,7 +4091,8 @@ function getTextAlternativeInternal(element, options) {
     if (maybeTrimmedAccessibleName) {
       if (options.outDerivedFromContent && insideTargetElement(options) && trimFlatString(accessibleName.text))
         options.outDerivedFromContent.value = true;
-      (_e = accessibleName.elements) == null ? void 0 : _e.add(element);
+      if (trimFlatString(accessibleName.text))
+        (_a = accessibleName.elements) == null ? void 0 : _a.add(element);
       return accessibleName;
     }
   }
@@ -4059,8 +4105,13 @@ function getTextAlternativeInternal(element, options) {
   options.visitedElements.add(element);
   return emptyCompositeString();
 }
+function isEmbeddedInHiddenReferenceTraversal(options) {
+  var _a, _b, _c, _d;
+  return !!((_a = options.embeddedInLabelledBy) == null ? void 0 : _a.hidden) || !!((_b = options.embeddedInDescribedBy) == null ? void 0 : _b.hidden) || !!((_c = options.embeddedInNativeTextAlternative) == null ? void 0 : _c.hidden) || !!((_d = options.embeddedInLabel) == null ? void 0 : _d.hidden);
+}
 function innerAccumulatedElementText(element, options) {
   const tokens = [];
+  const skipNotRenderedText = !options.includeHidden && !isEmbeddedInHiddenReferenceTraversal(options);
   const elements = options.collectElements ? /* @__PURE__ */ new Set() : void 0;
   const visit = (node, skipSlotted) => {
     var _a;
@@ -4076,6 +4127,8 @@ function innerAccumulatedElementText(element, options) {
         token = " " + token + " ";
       tokens.push(token);
     } else if (node.nodeType === 3) {
+      if (skipNotRenderedText && isTextNodeNotRendered(node))
+        return;
       tokens.push(node.textContent || "");
     }
   };
@@ -4123,13 +4176,14 @@ function getCheckedWithoutMixed(element) {
   return result;
 }
 function getChecked(element, allowMixed) {
+  var _a;
   const tagName = elementSafeTagName(element);
   if (allowMixed && tagName === "INPUT" && element.indeterminate)
     return "mixed";
   if (tagName === "INPUT" && ["checkbox", "radio"].includes(element.type))
     return element.checked;
   if (kAriaCheckedRoles.includes(getAriaRole(element) || "")) {
-    const checked = element.getAttribute("aria-checked");
+    const checked = (_a = element.getAttribute("aria-checked")) == null ? void 0 : _a.toLowerCase();
     if (checked === "true")
       return true;
     if (allowMixed && checked === "mixed")
@@ -4144,15 +4198,16 @@ function getReadonly(element) {
   if (["INPUT", "TEXTAREA", "SELECT"].includes(tagName))
     return element.hasAttribute("readonly");
   if (kAriaReadonlyRoles.includes(getAriaRole(element) || ""))
-    return element.getAttribute("aria-readonly") === "true";
+    return getAriaBoolean(element.getAttribute("aria-readonly")) === true;
   if (element.isContentEditable)
     return false;
   return "error";
 }
 var kAriaPressedRoles = ["button"];
 function getAriaPressed(element) {
+  var _a;
   if (kAriaPressedRoles.includes(getAriaRole(element) || "")) {
-    const pressed = element.getAttribute("aria-pressed");
+    const pressed = (_a = element.getAttribute("aria-pressed")) == null ? void 0 : _a.toLowerCase();
     if (pressed === "true")
       return true;
     if (pressed === "mixed")
@@ -4164,14 +4219,8 @@ var kAriaExpandedRoles = ["application", "button", "checkbox", "combobox", "grid
 function getAriaExpanded(element) {
   if (elementSafeTagName(element) === "DETAILS")
     return element.open;
-  if (kAriaExpandedRoles.includes(getAriaRole(element) || "")) {
-    const expanded = element.getAttribute("aria-expanded");
-    if (expanded === null)
-      return void 0;
-    if (expanded === "true")
-      return true;
-    return false;
-  }
+  if (kAriaExpandedRoles.includes(getAriaRole(element) || ""))
+    return getAriaBoolean(element.getAttribute("aria-expanded"));
   return void 0;
 }
 var kAriaLevelRoles = ["heading", "listitem", "row", "treeitem"];
@@ -4384,6 +4433,8 @@ function generateAriaTree(rootElement, publicOptions) {
     visited.add(node);
     if (node.nodeType === Node.TEXT_NODE && node.nodeValue) {
       if (!parentElementVisible)
+        return;
+      if (isTextNodeNotRendered(node))
         return;
       const text = node.nodeValue;
       if (ariaNode.role !== "textbox" && text)
@@ -6354,7 +6405,7 @@ function cssFallback(injectedScript, targetElement, options) {
     }
     tokens.unshift(bestTokenForLevel);
   }
-  return makeStrict(uniqueCSSSelector());
+  return makeStrict(tokens.join(" > "));
 }
 function penalizeScoreForLength(groups) {
   for (const group of groups) {
@@ -7000,27 +7051,24 @@ var UtilityScript = class {
     } else {
       if (typeof result === "function") result = result(...parameters);
     }
-    return returnByValue ? this._promiseAwareJsonValueNoThrow(result) : result;
+    if (isThenable(result)) {
+      return (async () => {
+        const value = await result;
+        return returnByValue ? this._jsonValueNoThrow(value) : value;
+      })();
+    }
+    return returnByValue ? this._jsonValueNoThrow(result) : result;
   }
   jsonValue(returnByValue, value) {
     if (value === void 0) return void 0;
     return serializeAsCallArgument(value, (value2) => ({ fallThrough: value2 }));
   }
-  _promiseAwareJsonValueNoThrow(value) {
-    const safeJson = (value2) => {
-      try {
-        return this.jsonValue(true, value2);
-      } catch (e) {
-        return void 0;
-      }
-    };
-    if (value && typeof value === "object" && typeof value.then === "function") {
-      return (async () => {
-        const promiseValue = await value;
-        return safeJson(promiseValue);
-      })();
+  _jsonValueNoThrow(value) {
+    try {
+      return this.jsonValue(true, value);
+    } catch (e) {
+      return void 0;
     }
-    return safeJson(value);
   }
   takeFunctionCallback(name) {
     const callback = this._functionCallbacks.get(name);
@@ -7028,6 +7076,9 @@ var UtilityScript = class {
     return callback;
   }
 };
+function isThenable(value) {
+  return value && typeof value === "object" && typeof value.then === "function";
+}
 
 // packages/injected/src/injectedScript.ts
 var InjectedScript = class {
@@ -7526,7 +7577,7 @@ var InjectedScript = class {
         element = element.closest("button, [role=button], [role=checkbox], [role=radio]") || element;
     }
     if (behavior === "follow-label") {
-      if (!element.matches("a, input, textarea, button, select, [role=link], [role=button], [role=checkbox], [role=radio]") && !element.isContentEditable) {
+      if (!element.matches("a, input, textarea, button, select, option, optgroup, [role=link], [role=button], [role=checkbox], [role=radio]") && !element.isContentEditable) {
         const enclosingLabel = element.closest("label");
         if (enclosingLabel && enclosingLabel.control)
           element = enclosingLabel.control;
@@ -7636,6 +7687,13 @@ var InjectedScript = class {
         received: disabled ? "disabled" : "enabled"
       };
     }
+    if (state === "non-inert") {
+      const inert = isElementInert(element);
+      return {
+        matches: !inert,
+        received: inert ? "inert" : "non-inert"
+      };
+    }
     if (state === "editable") {
       const disabled = getAriaDisabled(element);
       const readonly = getReadonly(element);
@@ -7733,14 +7791,10 @@ var InjectedScript = class {
         if (isNaN(Number(value)))
           throw this.createStacklessError("Cannot type text into input[type=number]");
       }
-      if (type === "color")
-        value = value.toLowerCase();
       if (kInputTypesToSetValue.has(type)) {
         value = value.trim();
         input.focus();
         input.value = value;
-        if (input.value !== value)
-          throw this.createStacklessError("Malformed value");
         element.dispatchEvent(new Event("input", { bubbles: true, composed: true }));
         element.dispatchEvent(new Event("change", { bubbles: true }));
         return "done";
@@ -7753,6 +7807,7 @@ var InjectedScript = class {
     return "needsinput";
   }
   selectText(node) {
+    var _a;
     const element = this.retarget(node, "follow-label");
     if (!element)
       return "error:notconnected";
@@ -7769,7 +7824,10 @@ var InjectedScript = class {
       textarea.focus();
       return "done";
     }
-    element.focus();
+    let focusTarget = element;
+    while (focusTarget.isContentEditable && ((_a = focusTarget.parentElement) == null ? void 0 : _a.isContentEditable))
+      focusTarget = focusTarget.parentElement;
+    focusTarget.focus();
     const range = element.ownerDocument.createRange();
     range.selectNodeContents(element);
     const selection = element.ownerDocument.defaultView.getSelection();

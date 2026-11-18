@@ -2,7 +2,6 @@
 //! (Playwright's `client/network.ts` `Route`/`RouteHandler` and the server's
 //! `network.ts` `Route` merged together).
 
-use std::collections::HashMap;
 use std::fmt;
 use std::future::{Future, IntoFuture};
 use std::path::PathBuf;
@@ -23,9 +22,9 @@ use tokio::sync::{oneshot, watch};
 use crate::browser::BrowserInner;
 use crate::browser_context::BrowserContext;
 use crate::error::{Error, Result, ResultExt};
+use crate::fetch::APIResponse;
 use crate::network::{
-    Header, Request, apply_headers_overrides, header_get, headers_to_map, mime_type_for_path,
-    status_text,
+    Header, Request, apply_headers_overrides, header_get, mime_type_for_path, status_text,
 };
 use crate::network_manager::{NetworkManager, header_entries};
 use crate::page::{Page, PageInner};
@@ -442,17 +441,17 @@ impl Route {
                 }
             }
         };
-        Ok(APIResponse {
-            url: merged.url.unwrap_or_else(|| request.url()),
+        Ok(APIResponse::owned(
+            merged.url.unwrap_or_else(|| request.url()),
             status,
-            status_text: event
+            event
                 .response_status_text
                 .clone()
                 .filter(|t| !t.is_empty())
                 .unwrap_or_else(|| status_text(status).to_string()),
             headers,
             body,
-        })
+        ))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -480,13 +479,13 @@ impl Route {
         }
         if let Some(response) = &response {
             if status.is_none() {
-                status = Some(response.status);
+                status = Some(response.status());
             }
             if headers_opt.is_none() {
-                headers_opt = Some(response.headers.clone());
+                headers_opt = Some(response.headers_array());
             }
             if body.is_none() && path.is_none() {
-                body = Some(response.body.clone());
+                body = Some(response.body().await?);
             }
         }
         if let Some(path) = &path {
@@ -739,15 +738,11 @@ impl Fetch {
         max_redirects: u32,
         max_retries: Option<u32>,
     ) -> Result<APIResponse> {
-        let location = response
-            .headers
-            .iter()
-            .find(|h| h.name.eq_ignore_ascii_case("location"))
-            .map(|h| h.value.clone());
+        let location = response.header_values("location").into_iter().next();
         let Some(location) = location.filter(|l| !l.is_empty()) else {
             return Ok(response);
         };
-        let Ok(next) = url::Url::parse(&response.url).and_then(|u| u.join(&location)) else {
+        let Ok(next) = url::Url::parse(response.url()).and_then(|u| u.join(&location)) else {
             return Ok(response);
         };
         let page = route
@@ -755,7 +750,7 @@ impl Fetch {
             .page
             .upgrade()
             .ok_or_else(Error::target_closed)?;
-        let status = response.status;
+        let status = response.status();
         let method = if status == 303 || ((status == 301 || status == 302) && method == "POST") {
             "GET".to_string()
         } else {
@@ -777,19 +772,7 @@ impl Fetch {
         if let Some(retries) = max_retries {
             fetch = fetch.max_retries(retries);
         }
-        let api = fetch.await?;
-        let body = api.body().await?;
-        Ok(APIResponse {
-            url: api.url().to_string(),
-            status: api.status(),
-            status_text: api.status_text().to_string(),
-            headers: api
-                .headers_array()
-                .into_iter()
-                .map(|h| Header::new(h.name, h.value))
-                .collect(),
-            body,
-        })
+        fetch.await
     }
 }
 
@@ -811,7 +794,7 @@ impl IntoFuture for Fetch {
             let route = self.route.clone();
             let run = async move {
                 let response = route.inner_fetch(self.overrides).await?;
-                if max_redirects > 0 && (300..400).contains(&response.status) {
+                if max_redirects > 0 && (300..400).contains(&response.status()) {
                     return Fetch::follow_redirect(
                         &route,
                         response,
@@ -967,74 +950,6 @@ impl IntoFuture for Fulfill {
                 .await
                 .api("route.fulfill")
         })
-    }
-}
-
-/// A response obtained with [`Route::fetch`].
-#[derive(Clone, Debug)]
-pub struct APIResponse {
-    url: String,
-    status: u16,
-    status_text: String,
-    headers: Vec<Header>,
-    body: Vec<u8>,
-}
-
-impl APIResponse {
-    /// Create a response (e.g. to fulfill a route with).
-    pub fn new(status: u16, headers: Vec<Header>, body: impl Into<Vec<u8>>) -> Self {
-        APIResponse {
-            url: String::new(),
-            status,
-            status_text: status_text(status).to_string(),
-            headers,
-            body: body.into(),
-        }
-    }
-
-    /// The URL of the response.
-    pub fn url(&self) -> &str {
-        &self.url
-    }
-
-    /// HTTP status code.
-    pub fn status(&self) -> u16 {
-        self.status
-    }
-
-    /// HTTP status text.
-    pub fn status_text(&self) -> &str {
-        &self.status_text
-    }
-
-    /// Whether the status is in the 200-299 range.
-    pub fn ok(&self) -> bool {
-        (200..=299).contains(&self.status)
-    }
-
-    /// Headers with lower-cased names.
-    pub fn headers(&self) -> HashMap<String, String> {
-        headers_to_map(&self.headers)
-    }
-
-    /// Headers as a list.
-    pub fn headers_array(&self) -> &[Header] {
-        &self.headers
-    }
-
-    /// The body.
-    pub async fn body(&self) -> Result<Vec<u8>> {
-        Ok(self.body.clone())
-    }
-
-    /// The body as text (lossy UTF-8).
-    pub async fn text(&self) -> Result<String> {
-        Ok(String::from_utf8_lossy(&self.body).into_owned())
-    }
-
-    /// The body parsed as JSON.
-    pub async fn json<T: serde::de::DeserializeOwned>(&self) -> Result<T> {
-        serde_json::from_slice(&self.body).map_err(Error::from)
     }
 }
 

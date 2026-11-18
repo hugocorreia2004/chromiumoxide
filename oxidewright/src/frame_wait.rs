@@ -228,21 +228,27 @@ async fn attempt(
     let (wire, handles) = arg
         .clone()
         .unwrap_or_else(|| (json!({ "v": "undefined" }), Vec::new()));
-    let state = call_injected(
-        &ctx,
-        WAIT_FOR_FUNCTION_JS,
-        vec![
-            CallArg::Json(Value::String(expression.to_string())),
-            CallArg::Js(match polling {
-                Some(n) => JsValue::Number(n as f64),
-                None => JsValue::Undefined,
-            }),
-            CallArg::Wire(wire, handles),
-        ],
-        false,
-    )
-    .await?;
-    let state = handle_of(state)?;
+    let args = vec![
+        CallArg::Json(Value::String(expression.to_string())),
+        CallArg::Js(match polling {
+            Some(n) => JsValue::Number(n as f64),
+            None => JsValue::Undefined,
+        }),
+        CallArg::Wire(wire, handles),
+    ];
+    // Start the loop in a task of its own: if this call is dropped (timeout)
+    // while the page is starting the loop, the task still gets its handle
+    // and aborts it, instead of leaving it running in the page forever.
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        let started = call_injected(&ctx, WAIT_FOR_FUNCTION_JS, args, false)
+            .await
+            .and_then(handle_of);
+        if let Err(Ok(state)) = tx.send(started) {
+            drop(AbortOnDrop(Some(state)));
+        }
+    });
+    let state = rx.await.map_err(|_| Error::target_closed())??;
     let mut guard = AbortOnDrop(Some(state.clone()));
     let result = tokio::select! {
         r = state.evaluate_inner("h => h.result", None, false) => r,
