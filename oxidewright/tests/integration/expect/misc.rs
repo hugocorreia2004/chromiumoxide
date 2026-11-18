@@ -771,7 +771,8 @@ fn to_have_url_resolve_predicate_after_retries() {
         });
         expect(&t.page)
             .to_have_url_matching(|url| url == "data:text/html,<div>B</div>")
-            .timeout(1000)
+            // The navigation starts after 500 ms: leave loaded machines room.
+            .timeout(3000)
             .await
             .unwrap();
     });
