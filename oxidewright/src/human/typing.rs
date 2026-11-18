@@ -497,7 +497,7 @@ impl Human {
             human: self,
             page: &page,
             session: self.session(&page).await?,
-            layout: cfg.layout,
+            layout: self.keyboard_layout(&page).await,
             shift: None,
         };
         let result = self.type_chars(&mut w, t).await;

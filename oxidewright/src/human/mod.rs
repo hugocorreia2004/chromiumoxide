@@ -150,7 +150,10 @@ impl Traits {
 
 #[derive(Clone, Debug)]
 struct Config {
-    layout: KeyboardLayout,
+    /// Chosen by the caller; `None`: from the browser's language.
+    layout: Option<KeyboardLayout>,
+    /// The layout found from the browser's language (once).
+    detected_layout: Option<KeyboardLayout>,
     human_mouse: bool,
     human_typing: bool,
     mobile: bool,
@@ -237,7 +240,8 @@ impl Human {
                 perm,
                 traits: Mutex::new(traits),
                 config: Mutex::new(Config {
-                    layout: KeyboardLayout::Us,
+                    layout: None,
+                    detected_layout: None,
                     human_mouse: true,
                     human_typing: true,
                     mobile: false,
@@ -266,10 +270,30 @@ impl Human {
         *self.inner.traits.lock().unwrap() = traits;
     }
 
-    /// The keyboard layout to type with (default US).
+    /// The keyboard layout to type with. Without it, the layout of the
+    /// browser's language (`navigator.language`: `es-ES` → Spanish, `en-GB`
+    /// → UK...; see [`KeyboardLayout::for_locale`]), read the first time
+    /// this person types.
     pub fn layout(self, layout: KeyboardLayout) -> Self {
-        self.config(|c| c.layout = layout);
+        self.config(|c| c.layout = Some(layout));
         self
+    }
+
+    /// The layout this person types with on `page`: the chosen one, or the
+    /// one of the browser's language (read once, then kept).
+    pub async fn keyboard_layout(&self, page: &Page) -> KeyboardLayout {
+        let cfg = self.cfg();
+        if let Some(layout) = cfg.layout.or(cfg.detected_layout) {
+            return layout;
+        }
+        let Ok(language) = page.evaluate::<String>("() => navigator.language").await else {
+            return KeyboardLayout::Us;
+        };
+        let layout = KeyboardLayout::for_locale(&language);
+        tracing::debug!("keyboard layout {layout:?} from the browser language {language}");
+        self.config(|c| c.detected_layout = Some(layout));
+        self.mark_variation("keyboard_layout", format!("{layout:?}"));
+        layout
     }
 
     /// Mouse on the physical pixel grid: every point is a multiple of

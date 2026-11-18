@@ -361,3 +361,47 @@ fn closing_the_browser_drops_the_person() {
         assert_eq!(human.remembered_pages(), 0);
     });
 }
+
+#[test]
+fn picks_the_keyboard_of_the_browser_language() {
+    run(|t| async move {
+        // (browser language, text, key, expected code, expected Shift, AltGr)
+        for (locale, text, key, code, shift, altgr) in [
+            ("es-ES", "año@x", "ñ", "Semicolon", false, false),
+            ("es-ES", "año@x", "@", "Digit2", false, true),
+            ("en-GB", "a@b", "@", "Quote", true, false),
+            ("en-US", "a@b", "@", "Digit2", true, false),
+        ] {
+            let context = t.browser.new_context().locale(locale).await.unwrap();
+            let page = context.new_page().await.unwrap();
+            page.set_content(format!(r#"{RECORDER}<input id="i">"#))
+                .await
+                .unwrap();
+            let human = page.human();
+            human
+                .type_text(&page.locator("#i"), text)
+                .errors(false)
+                .await
+                .unwrap();
+            assert_eq!(value(&page, "#i").await, text, "{locale}");
+            let ev = events(&page).await;
+            let down = ev
+                .iter()
+                .find(|e| e.kind == "keydown" && e.key.as_deref() == Some(key))
+                .unwrap_or_else(|| panic!("{locale}: no keydown for {key}"));
+            assert_eq!(down.code.as_deref(), Some(code), "{locale} {key}");
+            assert_eq!(down.shift, shift, "{locale} {key} shift");
+            assert_eq!(down.ctrl && down.alt, altgr, "{locale} {key} altgr");
+            context.close().await.unwrap();
+        }
+        // A layout chosen by the script wins over the browser language.
+        let context = t.browser.new_context().locale("en-GB").await.unwrap();
+        context.set_human(Human::new().layout(KeyboardLayout::Pt));
+        let page = context.new_page().await.unwrap();
+        assert_eq!(
+            page.human().keyboard_layout(&page).await,
+            KeyboardLayout::Pt
+        );
+        context.close().await.unwrap();
+    });
+}

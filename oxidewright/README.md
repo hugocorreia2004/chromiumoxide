@@ -184,7 +184,7 @@ human.pause(PauseKind::AfterSubmit).await;
 |---|---|
 | Mouse | Curved paths with Perlin tremor, Fitts' law timing, a speed cap, occasional overshoot; `grid(dpr, frame_ms)` puts every point on the physical pixel grid at one move per display frame |
 | Clicks | Off-center aim, the box checked again before pressing, a human hold time, the hand drifting away after; elements brought into view with the wheel (option lists inside menus too) |
-| Typing | Log-logistic flight times, digraphs, hand alternation, warm-up, fatigue, hesitations, pauses at letter/digit/punctuation boundaries and between number groups, typos corrected like a person, the real keys of the US, UK, PT or ES layout (Shift, AltGr, dead keys) |
+| Typing | Log-logistic flight times, digraphs, hand alternation, warm-up, fatigue, hesitations, pauses at letter/digit/punctuation boundaries and between number groups, typos corrected like a person, the real keys of the US, UK, PT or ES layout (Shift, AltGr, dead keys), chosen with `layout(..)` or else from the browser's language (`es-ES` → Spanish) |
 | Fields | `fix_field` corrects a value in place (click at the mistake, delete only what is wrong), `append_to_field`, `type_verified` |
 | Pauses | `pause`, `read`, `think`, `maybe_distraction`, with the mouse drifting meanwhile; `read_text` reads a text with the mouse resting near the next target |
 | Scrolling | Gliding wheel pushes in gestures, in the person's style; `explore` looks over a page |

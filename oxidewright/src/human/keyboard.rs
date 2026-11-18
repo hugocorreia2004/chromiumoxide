@@ -30,6 +30,26 @@ pub enum KeyboardLayout {
 }
 
 impl KeyboardLayout {
+    /// The layout of a browser language (`navigator.language`): by its
+    /// region when it has one (`es-ES` → Spain, `en-GB` → UK, `pt-BR` → US,
+    /// which has no layout here), else by the language (`es` → Spain, `pt`
+    /// → Portugal); US for any other.
+    pub fn for_locale(locale: &str) -> Self {
+        let mut parts = locale.trim().split(['-', '_']);
+        let language = parts.next().unwrap_or("").to_ascii_lowercase();
+        // The region is the 2-letter part (`zh-Hant-TW`: TW).
+        if let Some(region) =
+            parts.find(|p| p.len() == 2 && p.chars().all(|c| c.is_ascii_alphabetic()))
+        {
+            return Self::for_country(region);
+        }
+        match language.as_str() {
+            "es" | "ca" | "gl" | "eu" => Self::Es,
+            "pt" => Self::Pt,
+            _ => Self::Us,
+        }
+    }
+
     /// The layout people use in a country (ISO code); US for any other.
     pub fn for_country(country: &str) -> Self {
         match country.trim().to_ascii_uppercase().as_str() {
@@ -442,6 +462,20 @@ mod tests {
         assert!(one('é', KeyboardLayout::Uk).altgr);
         // US cannot type it.
         assert!(plan('é', KeyboardLayout::Us).is_none());
+    }
+
+    #[test]
+    fn layout_from_the_browser_language() {
+        assert_eq!(KeyboardLayout::for_locale("es-ES"), KeyboardLayout::Es);
+        assert_eq!(KeyboardLayout::for_locale("en-GB"), KeyboardLayout::Uk);
+        assert_eq!(KeyboardLayout::for_locale("pt-PT"), KeyboardLayout::Pt);
+        assert_eq!(KeyboardLayout::for_locale("pt_PT"), KeyboardLayout::Pt);
+        assert_eq!(KeyboardLayout::for_locale("en-US"), KeyboardLayout::Us);
+        assert_eq!(KeyboardLayout::for_locale("pt-BR"), KeyboardLayout::Us);
+        assert_eq!(KeyboardLayout::for_locale("es"), KeyboardLayout::Es);
+        assert_eq!(KeyboardLayout::for_locale("pt"), KeyboardLayout::Pt);
+        assert_eq!(KeyboardLayout::for_locale("de-DE"), KeyboardLayout::Us);
+        assert_eq!(KeyboardLayout::for_locale(""), KeyboardLayout::Us);
     }
 
     #[test]
