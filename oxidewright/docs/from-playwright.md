@@ -726,6 +726,7 @@ Also: `from_cache`, `sizes`.
 | Playwright | oxidewright | Notes |
 |---|---|---|
 | `request.newContext()` | `oxidewright::request().new_context().base_url(url).await` |  |
+| `request.newContext({ clientCertificates })` | `.client_certificates([ClientCertificate::new(origin).cert_path(..).key_path(..)])` | PEM cert + key per origin; `pfx` and encrypted keys not yet; browser contexts do not take client certificates yet |
 
 ### APIRequestContext
 

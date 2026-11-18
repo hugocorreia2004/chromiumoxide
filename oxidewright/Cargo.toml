@@ -45,6 +45,8 @@ stealth = ["chromiumoxide/stealth"]
 
 [dev-dependencies]
 axum = { version = "0.8", features = ["ws"] }
+rustls = "0.23"
+tokio-rustls = "0.26"
 tokio = { version = "1", features = ["full"] }
 
 [[test]]

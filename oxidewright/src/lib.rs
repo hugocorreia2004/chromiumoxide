@@ -198,8 +198,8 @@ pub use error::{CONTEXT_DESTROYED_MESSAGE, Error, Result, TARGET_CLOSED_MESSAGE}
 pub use events::{Event, EventKind, ListenerId, WaitForEvent};
 pub use execution_context::{ExecutionContext, World, set_default_isolated_context};
 pub use fetch::{
-    APIRequest, APIRequestContext, FilePayload, HttpCredentialsSend, MultipartValue, ProxySettings,
-    RequestData, request,
+    APIRequest, APIRequestContext, ClientCertificate, FilePayload, HttpCredentialsSend,
+    MultipartValue, ProxySettings, RequestData, request,
 };
 pub use file_chooser::{FileChooser, SetFiles};
 pub use frame::{

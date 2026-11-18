@@ -7,6 +7,7 @@ mod browser_api;
 mod browsercontext_fetch;
 mod chromium_tracing;
 mod clicks;
+mod client_certificates;
 mod common;
 mod content;
 mod context_network;

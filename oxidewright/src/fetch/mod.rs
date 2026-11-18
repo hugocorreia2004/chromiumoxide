@@ -11,6 +11,7 @@
 //! Requests are sent from this process, not from the browser: their TLS and
 //! HTTP/2 fingerprints are those of `rustls`/`hyper`, not Chrome's.
 
+mod client_certificate;
 mod cookie_store;
 mod multipart;
 
@@ -36,6 +37,7 @@ use crate::page::Page;
 use crate::storage_state::{NameValue, OriginState, StorageState, StorageStateSource};
 use crate::url_match::construct_url_based_on_base_url;
 
+pub use client_certificate::ClientCertificate;
 pub use multipart::{FilePayload, MultipartValue};
 
 use cookie_store::{CookieStore, parse_set_cookie};
@@ -127,6 +129,7 @@ struct Defaults {
     fail_on_status_code: bool,
     max_redirects: Option<u32>,
     proxy: Option<ProxySettings>,
+    client_certificates: Vec<ClientCertificate>,
     timeout: u64,
 }
 
@@ -243,6 +246,15 @@ impl NewRequestContext {
         self
     }
 
+    /// TLS client certificates, each presented to its own origin.
+    pub fn client_certificates(
+        mut self,
+        certificates: impl IntoIterator<Item = ClientCertificate>,
+    ) -> Self {
+        self.defaults.client_certificates = certificates.into_iter().collect();
+        self
+    }
+
     /// Initial cookies (and origins reported by `storage_state`).
     pub fn storage_state(mut self, state: impl Into<StorageStateSource>) -> Self {
         self.storage_state = Some(state.into());
@@ -257,6 +269,7 @@ impl IntoFuture for NewRequestContext {
         Box::pin(async move {
             async move {
                 let mut defaults = self.defaults;
+                client_certificate::validate(&defaults.client_certificates)?;
                 defaults.user_agent = self.user_agent.unwrap_or_else(default_user_agent);
                 defaults.timeout = self.timeout.unwrap_or(crate::DEFAULT_TIMEOUT);
                 let mut store = CookieStore::default();
@@ -304,7 +317,8 @@ enum Kind {
 
 struct Inner {
     kind: Kind,
-    clients: Mutex<HashMap<bool, reqwest::Client>>,
+    /// HTTP clients by (ignore HTTPS errors, client certificate).
+    clients: Mutex<HashMap<(bool, Option<usize>), reqwest::Client>>,
     responses: Mutex<HashMap<u64, Arc<Vec<u8>>>>,
     next_uid: AtomicU64,
     disposed: AtomicBool,
@@ -470,25 +484,40 @@ impl APIRequestContext {
                     fail_on_status_code: false,
                     max_redirects: None,
                     proxy: None,
+                    // Browser contexts do not take client certificates yet.
+                    client_certificates: Vec::new(),
                     timeout: context.inner.timeouts.timeout(None),
                 })
             }
         }
     }
 
-    fn client(
+    async fn client(
         &self,
         ignore_https_errors: bool,
         proxy: Option<&ProxySettings>,
+        certificate: Option<(usize, &ClientCertificate)>,
     ) -> Result<reqwest::Client> {
-        let mut clients = self.inner.clients.lock().unwrap();
-        if let Some(client) = clients.get(&ignore_https_errors) {
+        let key = (ignore_https_errors, certificate.map(|(i, _)| i));
+        if let Some(client) = self.inner.clients.lock().unwrap().get(&key) {
             return Ok(client.clone());
         }
+        let identity = match certificate {
+            Some((_, certificate)) => {
+                let pem = certificate.identity_pem().await?;
+                Some(reqwest::Identity::from_pem(&pem).map_err(|e| {
+                    Error::invalid_argument(format!("Invalid client certificate: {e}"))
+                })?)
+            }
+            None => None,
+        };
         let mut builder = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .tls_info(true)
             .tls_danger_accept_invalid_certs(ignore_https_errors);
+        if let Some(identity) = identity {
+            builder = builder.identity(identity);
+        }
         builder = match proxy {
             Some(proxy) => {
                 let server = if proxy.server.contains("://") {
@@ -511,7 +540,11 @@ impl APIRequestContext {
         let client = builder.build().map_err(|e| {
             Error::invalid_argument(format!("Failed to create the HTTP client: {e}"))
         })?;
-        clients.insert(ignore_https_errors, client.clone());
+        self.inner
+            .clients
+            .lock()
+            .unwrap()
+            .insert(key, client.clone());
         Ok(client)
     }
 
@@ -1344,9 +1377,17 @@ impl Fetch {
         let body = self.prepare_body(&mut headers).await?;
         let ignore_https_errors =
             self.ignore_https_errors.unwrap_or(false) || defaults.ignore_https_errors;
+        // The certificate of the request's origin (a redirect to another
+        // origin keeps this client).
+        let certificate = defaults
+            .client_certificates
+            .iter()
+            .enumerate()
+            .find(|(_, c)| c.matches(url.as_str()));
         let client = self
             .context
-            .client(ignore_https_errors, defaults.proxy.as_ref())?;
+            .client(ignore_https_errors, defaults.proxy.as_ref(), certificate)
+            .await?;
         let max_retries = self.max_retries.unwrap_or(0);
 
         let context = self.context.clone();
